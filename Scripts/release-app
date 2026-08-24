@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import plistlib
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+STAGING_APP = ROOT / "build/staging/PulsePhone.app"
+RELEASE_DIRECTORY = ROOT / "build/release"
+ARCHIVE_NAME = "PulsePhone-macos-arm64.zip"
+BUNDLE_IDENTIFIER = "com.pulsephone.PulsePhone"
+TEAM_IDENTIFIER = "GZC4TSS5TG"
+SHA1 = re.compile(r"^[0-9A-F]{40}$")
+KEYCHAIN_PROFILE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+IDENTITY = re.compile(
+    r'^\s*\d+\)\s+([0-9A-F]{40})\s+"Developer ID Application: .* \(([A-Z0-9]{10})\)"$'
+)
+
+
+class ReleaseError(ValueError):
+    pass
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise ReleaseError(message)
+
+
+def canonical_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def checked_regular_directory(path: Path, description: str) -> None:
+    metadata = path.lstat()
+    require(stat.S_ISDIR(metadata.st_mode) and not path.is_symlink(), description)
+
+
+def checked_regular_file(path: Path, description: str) -> None:
+    metadata = path.lstat()
+    require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1 and not path.is_symlink(), description)
+
+
+def command_output(arguments: list[str], *, include_stderr: bool = False) -> str:
+    completed = subprocess.run(
+        arguments,
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise ReleaseError(f"command failed ({' '.join(arguments[:3])}): {detail}")
+    return completed.stdout + (completed.stderr if include_stderr else "")
+
+
+def run(arguments: list[str]) -> None:
+    subprocess.run(arguments, cwd=ROOT, check=True, stdout=sys.stderr, stderr=sys.stderr)
+
+
+def release_identity(value: str) -> str:
+    identity = value.upper()
+    require(SHA1.fullmatch(identity) is not None, "release signing identity must be a 40-character SHA-1 fingerprint")
+    output = command_output(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"])
+    candidates = []
+    for line in output.splitlines():
+        match = IDENTITY.fullmatch(line)
+        if match is not None and match.group(1) == identity:
+            candidates.append(match.group(2))
+    require(candidates == [TEAM_IDENTIFIER], "release signing identity must be this team's Developer ID Application certificate")
+    return identity
+
+
+def bundle_path(relative: str) -> Path:
+    path = STAGING_APP / relative
+    checked_regular_file(path, f"release bundle executable: {relative}")
+    return path
+
+
+def validate_staging_app() -> dict[str, str]:
+    checked_regular_directory(STAGING_APP, "release staging app")
+    info_path = STAGING_APP / "Contents/Info.plist"
+    checked_regular_file(info_path, "release Info.plist")
+    try:
+        info = plistlib.loads(info_path.read_bytes())
+    except (plistlib.InvalidFileException, ValueError) as error:
+        raise ReleaseError("release Info.plist") from error
+    require(isinstance(info, dict), "release Info.plist")
+    version = info.get("CFBundleShortVersionString")
+    build = info.get("CFBundleVersion")
+    require(info.get("CFBundleIdentifier") == BUNDLE_IDENTIFIER, "release bundle identifier")
+    require(isinstance(version, str) and version, "release app version")
+    require(isinstance(build, str) and build.isdecimal() and int(build) > 0, "release build ID")
+    for relative in (
+        "Contents/MacOS/PulsePhone",
+        "Contents/Helpers/PulsePhoneRuntime",
+        "Contents/Helpers/PulsePhoneDirectHelper",
+        "Contents/Helpers/PulsePhoneCoreDeviceHelper",
+    ):
+        bundle_path(relative)
+    return {"build": build, "version": version}
+
+
+def codesign_arguments(identity: str, identifier: str, path: Path) -> list[str]:
+    return [
+        "/usr/bin/codesign", "--force", "--sign", identity, "--timestamp",
+        "--options", "runtime", "--identifier", identifier, str(path),
+    ]
+
+
+def signature_details(path: Path) -> dict[str, list[str]]:
+    output = command_output(
+        ["/usr/bin/codesign", "-d", "--verbose=4", str(path)],
+        include_stderr=True,
+    )
+    result: dict[str, list[str]] = {}
+    for line in output.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        result.setdefault(key, []).append(value)
+    return result
+
+
+def require_developer_id_signature(path: Path) -> None:
+    run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", str(path)])
+    details = signature_details(path)
+    authorities = details.get("Authority", [])
+    require(
+        any(value.startswith("Developer ID Application: ") for value in authorities),
+        "release app is not signed with Developer ID Application",
+    )
+    require(details.get("TeamIdentifier") == [TEAM_IDENTIFIER], "release signing team")
+    require(any("runtime" in value for value in details.get("CodeDirectory", [])), "release hardened runtime")
+    require("Timestamp" in details, "release secure timestamp")
+
+
+def seal_release_app(identity: str) -> None:
+    for relative, identifier in (
+        ("Contents/Helpers/PulsePhoneRuntime", f"{BUNDLE_IDENTIFIER}.runtime"),
+        ("Contents/Helpers/PulsePhoneDirectHelper", f"{BUNDLE_IDENTIFIER}.PulsePhoneDirectHelper"),
+        ("Contents/Helpers/PulsePhoneCoreDeviceHelper", f"{BUNDLE_IDENTIFIER}.PulsePhoneCoreDeviceHelper"),
+    ):
+        run(codesign_arguments(identity, identifier, bundle_path(relative)))
+    run(codesign_arguments(identity, BUNDLE_IDENTIFIER, STAGING_APP))
+    require_developer_id_signature(STAGING_APP)
+
+
+def write_archive(source: Path) -> Path:
+    RELEASE_DIRECTORY.mkdir(parents=True, exist_ok=True, mode=0o700)
+    checked_regular_directory(RELEASE_DIRECTORY, "release directory")
+    temporary = RELEASE_DIRECTORY / f".{ARCHIVE_NAME}.temporary"
+    if temporary.exists():
+        checked_regular_file(temporary, "release temporary archive")
+        temporary.unlink()
+    run(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(source), str(temporary)])
+    checked_regular_file(temporary, "release archive")
+    return temporary
+
+
+def notarize(archive: Path, profile: str) -> str:
+    output = command_output([
+        "/usr/bin/xcrun", "notarytool", "submit", str(archive),
+        "--keychain-profile", profile, "--wait", "--timeout", "30m", "--output-format", "json",
+    ])
+    try:
+        result = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise ReleaseError("notarytool response") from error
+    require(isinstance(result, dict), "notarytool response")
+    require(result.get("status") == "Accepted", f"notarytool status: {result.get('status')}")
+    submission_id = result.get("id")
+    require(isinstance(submission_id, str) and submission_id, "notarytool submission ID")
+    return submission_id
+
+
+def validate_notary_profile(profile: str) -> None:
+    output = command_output([
+        "/usr/bin/xcrun", "notarytool", "history",
+        "--keychain-profile", profile, "--output-format", "json",
+    ])
+    try:
+        result = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise ReleaseError("notary keychain profile response") from error
+    require(isinstance(result, dict), "notary keychain profile response")
+
+
+def publish_archive(temporary: Path) -> dict[str, str]:
+    final_archive = RELEASE_DIRECTORY / ARCHIVE_NAME
+    final_checksum = RELEASE_DIRECTORY / f"{ARCHIVE_NAME}.sha256"
+    archive_hash = hashlib.sha256(temporary.read_bytes()).hexdigest()
+    checksum_temporary = RELEASE_DIRECTORY / f".{ARCHIVE_NAME}.sha256.temporary"
+    checksum_temporary.write_text(f"{archive_hash}  {ARCHIVE_NAME}\n", encoding="ascii")
+    os_replace(temporary, final_archive)
+    os_replace(checksum_temporary, final_checksum)
+    return {"archiveSHA256": archive_hash, "archive": str(final_archive.relative_to(ROOT))}
+
+
+def os_replace(source: Path, destination: Path) -> None:
+    source.replace(destination)
+
+
+def release_app(signing_identity: str, keychain_profile: str) -> dict[str, Any]:
+    require(KEYCHAIN_PROFILE.fullmatch(keychain_profile) is not None, "notary keychain profile")
+    identity = release_identity(signing_identity)
+    version = validate_staging_app()
+    validate_notary_profile(keychain_profile)
+    seal_release_app(identity)
+    with tempfile.TemporaryDirectory(prefix="pulsephone-notary-") as directory:
+        submission_archive = Path(directory) / ARCHIVE_NAME
+        run(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(STAGING_APP), str(submission_archive)])
+        submission_id = notarize(submission_archive, keychain_profile)
+    run(["/usr/bin/xcrun", "stapler", "staple", str(STAGING_APP)])
+    run(["/usr/bin/xcrun", "stapler", "validate", str(STAGING_APP)])
+    require_developer_id_signature(STAGING_APP)
+    run(["/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=4", str(STAGING_APP)])
+    temporary_archive = write_archive(STAGING_APP)
+    published = publish_archive(temporary_archive)
+    return {
+        "archive": published["archive"],
+        "archiveSHA256": published["archiveSHA256"],
+        "build": version["build"],
+        "notarySubmissionID": submission_id,
+        "schemaVersion": 1,
+        "version": version["version"],
+    }
+
+
+def self_test() -> dict[str, Any]:
+    match = IDENTITY.fullmatch(
+        '  1) D79C979E94F4B27239B475E6D2D1161D2CBEF6BB '
+        '"Developer ID Application: Beijing Chiyan Medical Beauty Consulting Co., Ltd. (GZC4TSS5TG)"'
+    )
+    require(match is not None and match.group(2) == TEAM_IDENTIFIER, "Developer ID identity parsing")
+    require(IDENTITY.fullmatch('  1) A' + '0' * 39 + ' "Apple Development: Test (GZC4TSS5TG)"') is None, "development identity rejected")
+    require(KEYCHAIN_PROFILE.fullmatch("PulsePhoneNotary") is not None, "keychain profile parsing")
+    require(KEYCHAIN_PROFILE.fullmatch("unsafe/profile") is None, "unsafe keychain profile rejected")
+    require(ARCHIVE_NAME == "PulsePhone-macos-arm64.zip", "release asset name")
+    require(BUNDLE_IDENTIFIER == "com.pulsephone.PulsePhone", "release bundle ID")
+    return {"outcome": "passed", "schemaVersion": 1, "tests": 6}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="release-app")
+    parser.add_argument("--signing-identity")
+    parser.add_argument("--notary-keychain-profile")
+    parser.add_argument("--self-test", action="store_true")
+    arguments = parser.parse_args()
+    if arguments.self_test:
+        require(arguments.signing_identity is None and arguments.notary_keychain_profile is None, "self-test arguments")
+        result = self_test()
+    else:
+        require(arguments.signing_identity is not None, "--signing-identity is required")
+        require(arguments.notary_keychain_profile is not None, "--notary-keychain-profile is required")
+        result = release_app(arguments.signing_identity, arguments.notary_keychain_profile)
+    sys.stdout.buffer.write(canonical_bytes(result) + b"\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (ReleaseError, subprocess.CalledProcessError) as error:
+        print(f"release-app: {error}", file=sys.stderr)
+        raise SystemExit(2)

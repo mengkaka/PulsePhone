@@ -61,6 +61,25 @@ final class GoPackagingScriptTests: XCTestCase {
         }
     }
 
+    func testReleaseScriptRequiresDeveloperIDNotarizationAndStapling() throws {
+        let script = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("Scripts/release-app"),
+            encoding: .utf8
+        )
+        for required in [
+            "Developer ID Application",
+            "--timestamp",
+            "--options", "runtime",
+            "notarytool", "validate_notary_profile", "--keychain-profile", "--wait",
+            "stapler", "spctl",
+            "PulsePhone-macos-arm64.zip",
+            "release signing identity must be a 40-character SHA-1 fingerprint",
+        ] {
+            XCTAssertTrue(script.contains(required), required)
+        }
+        XCTAssertFalse(script.contains("/Users/a"))
+    }
+
     func testPythonRuntimePackagingInputsAndLicensesAreAbsent() {
         let fileManager = FileManager.default
         for relativePath in [

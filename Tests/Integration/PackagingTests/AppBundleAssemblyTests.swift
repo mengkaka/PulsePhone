@@ -100,6 +100,30 @@ final class AppBundleAssemblyTests: XCTestCase {
         XCTAssertEqual(result["tests"] as? Int, 32)
     }
 
+    func testReleaseAppSelfTestValidatesReleaseOnlyBoundaries() throws {
+        let process = Process()
+        process.executableURL = repositoryRoot.appendingPathComponent("Scripts/release-app")
+        process.arguments = ["--self-test"]
+        process.currentDirectoryURL = repositoryRoot
+        let output = Pipe()
+        let errors = Pipe()
+        process.standardOutput = output
+        process.standardError = errors
+        try process.run()
+        process.waitUntilExit()
+        let errorData = errors.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errorData, encoding: .utf8) ?? ""
+        )
+        let resultData = output.fileHandleForReading.readDataToEndOfFile()
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: resultData) as? [String: Any])
+        XCTAssertEqual(result["schemaVersion"] as? Int, 1)
+        XCTAssertEqual(result["outcome"] as? String, "passed")
+        XCTAssertEqual(result["tests"] as? Int, 6)
+    }
+
     func testDevRebuildLiveSelfTestClosesProcessSelectionAndTargetPaths() throws {
         let process = Process()
         process.executableURL = repositoryRoot.appendingPathComponent(
