@@ -13,6 +13,30 @@ PulsePhone is a macOS 14+ command-line and live-control client for USB-connected
 - GUI toolbar/window rows: 14
 - Owner-bound GUI interactions: 2
 
+## Install
+
+Install the latest signed, notarized macOS arm64 release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mengkaka/PulsePhone/main/Scripts/install-pulsephone | /bin/bash
+```
+
+The installer downloads `PulsePhone-macos-arm64.zip` and its `.sha256` file from the latest GitHub Release, verifies the archive, bundle ID, signing team, and Gatekeeper assessment, runs `PulsePhone self install`, then removes its temporary download. It installs to `~/Applications/PulsePhone.app` and provides `~/.local/bin/PulsePhone`; do not run it with `sudo`.
+
+For inspection before execution, download the script and read it locally before passing it to `/bin/bash`.
+
+### Agent Skill
+
+After the CLI is installed, publish the bundled PulsePhone skill for Codex, Claude Code, or both:
+
+```sh
+PulsePhone skill install --agent codex
+PulsePhone skill install --agent claude-code
+PulsePhone skill install --agent all
+```
+
+Install to another agent's absolute skill root with `PulsePhone skill install --skill-root /absolute/path`. Use `PulsePhone skill status` to inspect managed targets. If a managed skill was edited locally, rerun the install with `--force` only when replacing those managed files is intended.
+
 ## CLI
 
 Every public command supports human output and `--json`; success is written to stdout, progress and human errors to stderr, and JSON terminal output is exactly one envelope.

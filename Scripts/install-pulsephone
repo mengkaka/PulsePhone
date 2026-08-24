@@ -1,0 +1,76 @@
+#!/bin/bash
+
+set -euo pipefail
+
+readonly repository="mengkaka/PulsePhone"
+readonly asset_name="PulsePhone-macos-arm64.zip"
+readonly checksum_name="${asset_name}.sha256"
+readonly bundle_identifier="com.pulsephone.PulsePhone"
+readonly team_identifier="GZC4TSS5TG"
+readonly release_base_url="https://github.com/${repository}/releases/latest/download"
+
+fail() {
+    /usr/bin/printf 'PulsePhone installer: %s\n' "$*" >&2
+    exit 1
+}
+
+require_macos_arm64() {
+    [ "$(/usr/bin/uname -s)" = "Darwin" ] || fail "macOS is required"
+    [ "$(/usr/bin/uname -m)" = "arm64" ] || fail "Apple silicon is required"
+
+    local_version="$(/usr/bin/sw_vers -productVersion)"
+    local_major="${local_version%%.*}"
+    case "$local_major" in
+        ''|*[!0-9]*) fail "could not determine the macOS version" ;;
+    esac
+    [ "$local_major" -ge 14 ] || fail "macOS 14 or later is required"
+}
+
+cleanup() {
+    status="$?"
+    trap - EXIT HUP INT TERM
+    /bin/rm -rf "$temporary_directory"
+    exit "$status"
+}
+
+[ "$(/usr/bin/id -u)" -ne 0 ] || fail "do not run with sudo"
+require_macos_arm64
+
+temporary_directory="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/pulsephone-install.XXXXXX")"
+trap cleanup EXIT HUP INT TERM
+
+archive_path="${temporary_directory}/${asset_name}"
+checksum_path="${temporary_directory}/${checksum_name}"
+extract_path="${temporary_directory}/extracted"
+
+/usr/bin/curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+    --connect-timeout 15 --output "$archive_path" "${release_base_url}/${asset_name}"
+/usr/bin/curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+    --connect-timeout 15 --output "$checksum_path" "${release_base_url}/${checksum_name}"
+
+expected_hash="$(/usr/bin/awk -v asset="$asset_name" '$2 == asset { print $1; exit }' "$checksum_path")"
+case "$expected_hash" in
+    *[!0123456789abcdefABCDEF]*|'') fail "release checksum has an invalid format" ;;
+esac
+[ "${#expected_hash}" -eq 64 ] || fail "release checksum has an invalid format"
+
+actual_hash="$(/usr/bin/shasum -a 256 "$archive_path" | /usr/bin/awk '{ print $1 }')"
+[ "$actual_hash" = "$expected_hash" ] || fail "release archive checksum mismatch"
+
+/bin/mkdir "$extract_path"
+/usr/bin/ditto -x -k "$archive_path" "$extract_path"
+application_path="${extract_path}/PulsePhone.app"
+[ -d "$application_path" ] || fail "release archive does not contain PulsePhone.app"
+[ -x "${application_path}/Contents/MacOS/PulsePhone" ] || fail "release app executable is missing"
+
+actual_bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+    "${application_path}/Contents/Info.plist")"
+[ "$actual_bundle_identifier" = "$bundle_identifier" ] || fail "release bundle identifier mismatch"
+
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$application_path"
+actual_team_identifier="$(/usr/bin/codesign -dv --verbose=4 "$application_path" 2>&1 \
+    | /usr/bin/awk -F= '/^TeamIdentifier=/{ print $2; exit }')"
+[ "$actual_team_identifier" = "$team_identifier" ] || fail "release signing team mismatch"
+/usr/sbin/spctl --assess --type execute --verbose=4 "$application_path"
+
+"${application_path}/Contents/MacOS/PulsePhone" self install
