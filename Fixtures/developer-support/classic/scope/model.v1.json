@@ -1,0 +1,1 @@
+{"basicCommands":["app.install","app.uninstall","device.info","device.list","device.status"],"developerSupportCommands":["app.launch","device.prepare","screenshot.cli","screenshot.gui"]}

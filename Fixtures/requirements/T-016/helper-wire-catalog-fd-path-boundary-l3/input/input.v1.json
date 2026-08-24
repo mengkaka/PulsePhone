@@ -1,0 +1,1 @@
+{"cases":[{"name":"validCatalogReference"},{"name":"absolutePath"},{"name":"wrongGeneration"},{"name":"frameAckBeforeFrame"},{"name":"duplicateResult"}],"schemaVersion":1}

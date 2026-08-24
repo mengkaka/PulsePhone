@@ -1,0 +1,11 @@
+.DS_Store
+**/.DS_Store
+
+.build/
+.swiftpm/
+build/
+dist/
+.pulsephone-local/
+
+__pycache__/
+*.pyc

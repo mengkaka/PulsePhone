@@ -1,0 +1,1 @@
+{"models":["oneShot","stream"],"requiredPhases":["received","planning","awaitingCapability","pending","running","cleaning","terminal"],"terminalCommitMode":"firstWins"}

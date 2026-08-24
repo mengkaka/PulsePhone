@@ -1,0 +1,109 @@
+{
+  "cases": [
+    {
+      "commitState": "notCommitted",
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {"code": "installFailed", "details": {"commitState": "notCommitted", "stage": "afcFinalize"}},
+        "outcome": "failed"
+      },
+      "name": "installAFCFinalizeFailure",
+      "operation": "install",
+      "stage": "afcFinalize",
+      "transition": "failure"
+    },
+    {
+      "commitState": "notCommitted",
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {"code": "installFailed", "details": {"commitState": "notCommitted", "stage": "serviceOpen"}},
+        "outcome": "failed"
+      },
+      "name": "installServiceOpenNormalizesTransportFailure",
+      "operation": "install",
+      "stage": "serviceOpen",
+      "transition": "failure"
+    },
+    {
+      "expectedResult": {
+        "commitState": "unknown",
+        "error": {"code": "outcomeUnknown", "details": {"reason": "commitStateUnknown"}},
+        "outcome": "outcomeUnknown"
+      },
+      "name": "installProxyRequestMayHaveCommitted",
+      "operation": "install",
+      "transition": "outcomeUnknown"
+    },
+    {
+      "commitState": "committed",
+      "expectedResult": {
+        "commitState": "committed",
+        "error": {"code": "installFailed", "details": {"commitState": "committed", "stage": "installationProxyResponse"}},
+        "outcome": "failed"
+      },
+      "name": "installProxyRejectsAfterCommit",
+      "operation": "install",
+      "stage": "installationProxyResponse",
+      "transition": "failure"
+    },
+    {
+      "commitState": "notCommitted",
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {"code": "installFailed", "details": {"commitState": "notCommitted", "stage": "installationProxyRequest"}},
+        "outcome": "failed"
+      },
+      "name": "installResponseGraceExpiresBeforeSubmit",
+      "operation": "install",
+      "stage": "installationProxyRequest",
+      "transition": "failure"
+    },
+    {
+      "commitState": "notCommitted",
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {"code": "uninstallFailed", "details": {"commitState": "notCommitted", "stage": "installationProxyLookup"}},
+        "outcome": "failed"
+      },
+      "name": "uninstallLookupFailure",
+      "operation": "uninstall",
+      "stage": "installationProxyLookup",
+      "transition": "failure"
+    },
+    {
+      "expectedResult": {
+        "commitState": "unknown",
+        "error": {"code": "outcomeUnknown", "details": {"reason": "commitStateUnknown"}},
+        "outcome": "outcomeUnknown"
+      },
+      "name": "uninstallProxyRequestMayHaveCommitted",
+      "operation": "uninstall",
+      "transition": "outcomeUnknown"
+    },
+    {
+      "commitState": "notCommitted",
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {"code": "uninstallFailed", "details": {"commitState": "notCommitted", "stage": "installationProxyRequest"}},
+        "outcome": "failed"
+      },
+      "name": "uninstallResponseGraceExpiresBeforeSubmit",
+      "operation": "uninstall",
+      "stage": "installationProxyRequest",
+      "transition": "failure"
+    },
+    {
+      "commitState": "committed",
+      "expectedResult": {
+        "commitState": "committed",
+        "error": {"code": "uninstallFailed", "details": {"commitState": "committed", "stage": "installationProxyResponse"}},
+        "outcome": "failed"
+      },
+      "name": "uninstallProxyRejectsAfterCommit",
+      "operation": "uninstall",
+      "stage": "installationProxyResponse",
+      "transition": "failure"
+    }
+  ],
+  "schemaVersion": 1
+}

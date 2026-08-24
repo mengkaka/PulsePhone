@@ -1,0 +1,128 @@
+{
+  "cases": [
+    {
+      "backendPayload": {"operation": "unsupported"},
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "capabilityUnavailable",
+          "details": {"commitState": "notCommitted", "stage": "directDispatcher"}
+        },
+        "outcome": "failed"
+      },
+      "name": "unsupportedOperation"
+    },
+    {
+      "backendPayload": {"ipaPath": 1, "operation": "install"},
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "invalidIPA",
+          "details": {"commitState": "notCommitted", "stage": "archivePreflight"}
+        },
+        "outcome": "failed"
+      },
+      "name": "installPreflightFailure"
+    },
+    {
+      "backendPayload": {"bundleID": "not-a-bundle", "operation": "uninstall"},
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "uninstallFailed",
+          "details": {"commitState": "notCommitted", "stage": "requestValidation"}
+        },
+        "outcome": "failed"
+      },
+      "name": "uninstallRequestFailure"
+    },
+    {
+      "backendPayload": {"bundleID": "not-a-bundle", "commandID": "app.launch", "operation": "launch"},
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "appLaunchFailed",
+          "details": {"commitState": "notCommitted", "stage": "requestValidation"}
+        },
+        "outcome": "failed"
+      },
+      "name": "launchRequestFailure"
+    },
+    {
+      "backendPayload": {"operation": "screenshot"},
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "artifactValidationFailed",
+          "details": {"stage": "reservation"}
+        },
+        "outcome": "failed"
+      },
+      "name": "screenshotReservationFailure"
+    },
+    {
+      "backendPayload": {
+        "assetContentManifestSHA256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "catalogCanonicalSHA256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "catalogRevision": "missing-revision",
+        "deviceContext": {"connectionEpoch": 8},
+        "fileRoles": [],
+        "operation": "queryMounted",
+        "preparationAttemptID": "00000000-0000-0000-0000-000000000005",
+        "preparationGroupID": "prep.legacy.developer.v2"
+      },
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "developerSupportUnavailable",
+          "details": {"phase": "queryingMountedImage", "preparationGroupID": "prep.legacy.developer.v2"}
+        },
+        "outcome": "failed"
+      },
+      "name": "classicQuerySupportUnavailableBeforeCatalog"
+    },
+    {
+      "backendPayload": {
+        "assetContentManifestSHA256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "catalogCanonicalSHA256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "catalogRevision": "missing-revision",
+        "deviceContext": {"connectionEpoch": 8},
+        "fileRoles": [],
+        "operation": "probeServices",
+        "preparationAttemptID": "00000000-0000-0000-0000-000000000006",
+        "preparationGroupID": "prep.legacy.developer.v2"
+      },
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "developerSupportUnavailable",
+          "details": {"phase": "probingServices", "preparationGroupID": "prep.legacy.developer.v2"}
+        },
+        "outcome": "failed"
+      },
+      "name": "classicProbeSupportUnavailableBeforeCatalog"
+    },
+    {
+      "backendPayload": {
+        "assetContentManifestSHA256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "catalogCanonicalSHA256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "catalogRevision": "missing-revision",
+        "deviceContext": {"connectionEpoch": 8},
+        "fileRoles": ["classic.image", "classic.signature"],
+        "operation": "mount",
+        "preparationAttemptID": "00000000-0000-0000-0000-000000000007",
+        "preparationGroupID": "prep.legacy.developer.v2"
+      },
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "developerSupportUnavailable",
+          "details": {"phase": "mounting", "preparationGroupID": "prep.legacy.developer.v2"}
+        },
+        "outcome": "failed"
+      },
+      "name": "classicMountSupportUnavailableBeforeCatalog"
+    }
+  ],
+  "schemaVersion": 1
+}

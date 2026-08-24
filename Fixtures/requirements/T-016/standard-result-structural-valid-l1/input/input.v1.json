@@ -1,0 +1,1 @@
+{"cases":[{"outcome":"succeeded"},{"outcome":"succeeded","value":1},{"error":true,"outcome":"failed"},{"error":true,"outcome":"partial"},{"error":true,"outcome":"outcomeUnknown"},{"outcome":"cancelled","value":2},{"error":true,"outcome":"cancelled","value":3}]}

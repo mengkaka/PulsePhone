@@ -1,0 +1,1 @@
+{"automaticRetryPolicy":"never","commandIDs":["app.install","app.launch","app.uninstall","button.appSwitcher","button.home","button.lock","button.mute","button.volumeDown","button.volumeUp","device.rotate","gui.softwareKeyboard.toggle","text.clear","text.cursor","text.inputSource.next","text.key","text.type","touch.drag","touch.swipe","touch.tap"],"outcome":"passed"}

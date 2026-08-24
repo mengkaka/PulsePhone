@@ -1,0 +1,1 @@
+{"$id":"liveCloseResult.v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"cleanedStreamCount":{"minimum":0,"type":"integer"},"disposition":{"enum":["closed","closing","idempotent"],"type":"string"}},"required":["cleanedStreamCount","disposition"],"type":"object","x-pulsephone-maxEncodedBytes":4096}

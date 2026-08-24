@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "releaseIncluded": false,
+  "sourcePolicy": "host-provisioned-only-no-network-install",
+  "interpreter": {
+    "path": "/usr/bin/python3",
+    "major": 3,
+    "minor": 9,
+    "source": "Xcode-provided macOS Python"
+  },
+  "profiles": [
+    {
+      "profileID": "contract-tooling",
+      "pythonPath": ["Scripts/lib"],
+      "selectors": ["registry_parity", "tooling_python"],
+      "dependencies": [
+        {
+          "distribution": "Python standard library",
+          "version": "interpreter-provided",
+          "source": "Xcode-provided macOS Python"
+        }
+      ],
+      "releaseIncluded": false
+    }
+  ],
+  "releaseForbidden": [
+    "Python runtime",
+    "Python wheels",
+    "Python source",
+    "Python-only licenses",
+    "legacy helper entrypoints"
+  ]
+}

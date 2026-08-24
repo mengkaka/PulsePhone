@@ -1,0 +1,74 @@
+{
+  "cases": [
+    {
+      "devices": [],
+      "expectedCode": "deviceNotFound",
+      "expectedProbeCalls": 0,
+      "failureAt": "none",
+      "failureKind": "none",
+      "name": "noDeviceFailsWithoutProbe"
+    },
+    {
+      "devices": [
+        {"deviceID": 17, "rawTransportUDID": "raw", "transport": "usb"},
+        {"deviceID": 17, "rawTransportUDID": "raw", "transport": "usb"}
+      ],
+      "expectedCode": "deviceNotFound",
+      "expectedProbeCalls": 0,
+      "failureAt": "none",
+      "failureKind": "none",
+      "name": "ambiguousTargetFailsWithoutProbe"
+    },
+    {
+      "devices": [],
+      "expectedCode": "deviceDisconnected",
+      "expectedProbeCalls": 0,
+      "failureAt": "enumerate",
+      "failureCode": "deviceDisconnected",
+      "failureKind": "typed",
+      "name": "enumerationDisconnectPreservesPublicError"
+    },
+    {
+      "devices": [
+        {"deviceID": 17, "rawTransportUDID": "raw", "transport": "usb"}
+      ],
+      "expectedCode": "deviceNotTrusted",
+      "expectedProbeCalls": 1,
+      "failureAt": "probe",
+      "failureCode": "deviceNotTrusted",
+      "failureKind": "typed",
+      "name": "lockdownTrustFailurePreservesPublicError"
+    },
+    {
+      "devices": [
+        {"deviceID": 17, "rawTransportUDID": "raw", "transport": "usb"}
+      ],
+      "expectedCode": "probeUnavailable",
+      "expectedProbeCalls": 1,
+      "failureAt": "probe",
+      "failureKind": "timeout",
+      "name": "lockdownTimeoutRemainsProbeUnavailable"
+    },
+    {
+      "devices": [
+        {"deviceID": 17, "rawTransportUDID": "raw", "transport": "usb"}
+      ],
+      "expectedCode": "probeUnavailable",
+      "expectedProbeCalls": 1,
+      "failureAt": "probe",
+      "failureKind": "os",
+      "name": "lockdownOSErrorRemainsProbeUnavailable"
+    },
+    {
+      "devices": [
+        {"deviceID": 17, "rawTransportUDID": "raw", "transport": "usb"}
+      ],
+      "expectedCode": "internalFailure",
+      "expectedProbeCalls": 1,
+      "failureAt": "probe",
+      "failureKind": "generic",
+      "name": "unexpectedBackendFailureDoesNotMasqueradeAsProbeFailure"
+    }
+  ],
+  "schemaVersion": 1
+}

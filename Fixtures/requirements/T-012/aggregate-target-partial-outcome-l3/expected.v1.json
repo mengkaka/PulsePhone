@@ -1,0 +1,1 @@
+{"exitCode":7,"outcome":"outcomeUnknown","targets":[{"canonicalUDID":"A","state":"completed"},{"canonicalUDID":"B","state":"notStarted"},{"canonicalUDID":"C","state":"timedOut"},{"canonicalUDID":"D","state":"outcomeUnknown"}]}

@@ -1,0 +1,1 @@
+{"profiles":[{"maximumMajorExclusive":17,"minimumMajor":14,"preparationGroupID":"prep.legacy.developer.v2","profileID":"legacyClassic","route":"classic"},{"minimumMajor":17,"preparationGroupID":"prep.coredevice.v2","profileID":"modernRSD","route":"personalized"}],"schemaVersion":1,"unsupportedMajors":[0,13]}

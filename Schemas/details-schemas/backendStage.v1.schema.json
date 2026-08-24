@@ -1,0 +1,1 @@
+{"$id":"backendStage.v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"commitState":{"enum":["committed","notCommitted","unknown"],"type":"string"},"normalizedBackendCode":{"maxLength":256,"type":"string"},"stage":{"maxLength":256,"type":"string"}},"required":["stage"],"type":"object","x-pulsephone-maxEncodedBytes":8192}

@@ -1,0 +1,1 @@
+{"$id":"probe.v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"reason":{"enum":["malformedResponse","terminationTimeout","timeout","unavailable"],"type":"string"}},"required":["reason"],"type":"object","x-pulsephone-maxEncodedBytes":8192}

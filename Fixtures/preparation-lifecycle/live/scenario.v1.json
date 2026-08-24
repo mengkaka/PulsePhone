@@ -1,0 +1,1 @@
+{"events":["registerLivePrewarm","attemptReady","detach","reconnect","capabilityInvalidated","newAttempt"],"persistence":"persistentAcrossReconnect","terminalObserver":false}

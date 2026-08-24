@@ -1,0 +1,1 @@
+{"$id":"appOperationResult.v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"bundleID":{"maxLength":255,"type":"string"},"disposition":{"enum":["installed","launchRequested","uninstalled"],"type":"string"}},"required":["bundleID","disposition"],"type":"object","x-pulsephone-maxEncodedBytes":4096}

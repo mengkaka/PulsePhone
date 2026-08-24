@@ -1,0 +1,1 @@
+{"ancillaryFaults":["duplicateFD","remainingHeaderFD","payloadFD","controlTruncated"],"finalControlAttempts":5,"partialWriteBytes":3,"regularFrameAttempts":129}

@@ -1,0 +1,1 @@
+{"$id":"argument.v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"argumentName":{"maxLength":256,"type":"string"},"limit":{"minimum":0,"type":"integer","x-pulsephone-integerDomain":"UInt64"},"reason":{"maxLength":1024,"type":"string"}},"required":["argumentName","reason"],"type":"object","x-pulsephone-maxEncodedBytes":4096}

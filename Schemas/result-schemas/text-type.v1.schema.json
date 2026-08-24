@@ -1,0 +1,1 @@
+{"$id":"textTypeResult.v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"disposition":{"const":"pasteDispatched"},"textByteCount":{"maximum":65536,"minimum":0,"type":"integer"},"textRedacted":{"const":true}},"required":["disposition","textByteCount","textRedacted"],"type":"object","x-pulsephone-maxEncodedBytes":1024}

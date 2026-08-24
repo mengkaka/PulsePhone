@@ -1,0 +1,196 @@
+{
+  "cases": [
+    {
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "outcome": "succeeded",
+        "value": {"disposition": "ready"}
+      },
+      "mode": "personalizedSuccess",
+      "name": "personalizedPreparationSuccessRemainsNotCommitted"
+    },
+    {
+      "expectedResult": {
+        "commitState": "committed",
+        "outcome": "succeeded",
+        "value": {
+          "captureProvider": "coreDevice",
+          "generationDisposition": "retiringAfterResult"
+        }
+      },
+      "mode": "screenshotRetirementSuccess",
+      "name": "screenshotFallbackRetiresAfterTerminalResultWithoutInternalMarker"
+    },
+    {
+      "error": {
+        "code": "outcomeUnknown",
+        "committed": true,
+        "kind": "product",
+        "outcomeUnknown": true,
+        "stage": "orientation"
+      },
+      "expectedResult": {
+        "commitState": "committed",
+        "error": {
+          "code": "outcomeUnknown",
+          "details": {
+            "phase": "executingProductRoute",
+            "preparationGroupID": "prep.coredevice.v2",
+            "stage": "orientation"
+          }
+        },
+        "outcome": "outcomeUnknown"
+      },
+      "mode": "oneShot",
+      "name": "productErrorPreservesExecutionPhaseAndStage"
+    },
+    {
+      "error": {
+        "code": "internalFailure",
+        "committed": false,
+        "kind": "product",
+        "outcomeUnknown": false,
+        "stage": ""
+      },
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "internalFailure",
+          "details": {
+            "phase": "executingProductRoute",
+            "preparationGroupID": "prep.coredevice.v2"
+          }
+        },
+        "outcome": "failed"
+      },
+      "mode": "oneShot",
+      "name": "pasteboardSetFailureUsesInternalFailureWithoutStage"
+    },
+    {
+      "error": {
+        "code": "appLaunchFailed",
+        "committed": false,
+        "kind": "product",
+        "outcomeUnknown": false,
+        "stage": ""
+      },
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "appLaunchFailed",
+          "details": {
+            "phase": "executingProductRoute",
+            "preparationGroupID": "prep.coredevice.v2"
+          }
+        },
+        "outcome": "failed"
+      },
+      "mode": "oneShot",
+      "name": "appLaunchFailureUsesNotCommittedWithoutStage"
+    },
+    {
+      "error": {"kind": "generic"},
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "developerServicesUnavailable",
+          "details": {
+            "phase": "startingDeviceServices",
+            "preparationGroupID": "prep.coredevice.v2"
+          }
+        },
+        "outcome": "failed"
+      },
+      "mode": "oneShot",
+      "name": "startupErrorPreservesPreparationGroup"
+    },
+    {
+      "error": {
+        "code": "personalizationServiceUnavailable",
+        "kind": "product",
+        "phase": "personalizationTSS"
+      },
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "personalizationServiceUnavailable",
+          "details": {
+            "phase": "personalizationTSS",
+            "preparationGroupID": "prep.coredevice.v2"
+          }
+        },
+        "outcome": "failed"
+      },
+      "mode": "oneShot",
+      "name": "personalizationTSSFailureKeepsHelperAlive"
+    },
+    {
+      "error": {
+        "code": "developerSupportUnavailable",
+        "kind": "product",
+        "phase": "startingDeviceServices",
+        "retireGeneration": true
+      },
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "developerSupportUnavailable",
+          "details": {
+            "phase": "startingDeviceServices",
+            "preparationGroupID": "prep.coredevice.v2"
+          }
+        },
+        "outcome": "failed"
+      },
+      "mode": "oneShot",
+      "name": "personalizedSupportFailureRetiresAfterResult"
+    },
+    {
+      "error": {
+        "code": "developerServicesUnavailable",
+        "committed": false,
+        "kind": "product",
+        "outcomeUnknown": false,
+        "retireGeneration": true,
+        "stage": "screenshotCaptureOrValidate"
+      },
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "developerServicesUnavailable",
+          "details": {
+            "phase": "executingProductRoute",
+            "preparationGroupID": "prep.coredevice.v2",
+            "stage": "screenshotCaptureOrValidate"
+          }
+        },
+        "outcome": "failed"
+      },
+      "mode": "oneShot",
+      "name": "screenshotFailureRetiresGenerationAfterTerminalError"
+    },
+    {
+      "error": {
+        "code": "invalidArgument",
+        "committed": false,
+        "kind": "product",
+        "outcomeUnknown": false,
+        "stage": "openingInputService"
+      },
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "invalidArgument",
+          "details": {
+            "phase": "openingInputService",
+            "preparationGroupID": "prep.coredevice.v2"
+          }
+        },
+        "outcome": "failed"
+      },
+      "mode": "streamBarrier",
+      "name": "streamFailureUsesStreamPhaseWithoutStage"
+    }
+  ],
+  "schemaVersion": 1
+}

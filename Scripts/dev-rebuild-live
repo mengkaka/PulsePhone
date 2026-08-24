@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import runpy
+import signal
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Iterable
+
+
+ROOT = Path(__file__).resolve().parents[1]
+STAGING_APP = ROOT / "build/staging/PulsePhone.app"
+STAGING_EXECUTABLE = STAGING_APP / "Contents/MacOS/PulsePhone"
+STAGING_RUNTIME = STAGING_APP / "Contents/Helpers/PulsePhoneRuntime"
+TEMPORARY_BASE = Path("/tmp") / f"pulsephone-{os.geteuid()}"
+PACKAGE = runpy.run_path(
+    str(ROOT / "Scripts/package-app"),
+    run_name="pulsephone_package_app",
+)
+PackagingError = PACKAGE["PackagingError"]
+
+
+class DevRebuildLiveError(ValueError):
+    pass
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise DevRebuildLiveError(message)
+
+
+def canonical_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def log_event(event: str, **fields: Any) -> None:
+    payload = {"event": event, "schemaVersion": 1, **fields}
+    sys.stderr.buffer.write(canonical_bytes(payload) + b"\n")
+    sys.stderr.flush()
+
+
+def normalize_udid(value: str) -> str:
+    normalized = value.strip().upper()
+    encoded = normalized.encode("ascii", errors="strict")
+    require(0 < len(encoded) <= 128, "canonical UDID byte count")
+    require(
+        all(byte == 0x2D or 0x30 <= byte <= 0x39 or 0x41 <= byte <= 0x5A
+            for byte in encoded),
+        "canonical UDID characters",
+    )
+    return normalized
+
+
+def domain_hash(domain_id: str, payload: str) -> str:
+    return hashlib.sha256(
+        domain_id.encode("ascii") + b"\0" + payload.encode("utf-8")
+    ).hexdigest()
+
+
+def target_paths(canonical_udid: str) -> dict[str, Path]:
+    target_hash = domain_hash("pulsephone.udid.v1", canonical_udid)
+    return {
+        "bootstrapLock": TEMPORARY_BASE / f"{target_hash}.bootstrap.lock",
+        "helperManifest": TEMPORARY_BASE / f"{target_hash}.helpers.v1.json",
+        "runtimeLock": TEMPORARY_BASE / f"{target_hash}.runtime.lock",
+        "runtimeSocket": TEMPORARY_BASE / f"{target_hash}.sock",
+    }
+
+
+def process_snapshot() -> list[Any]:
+    return PACKAGE["process_snapshot"]()
+
+
+def staging_gui_hosts(processes: Iterable[Any] | None = None) -> list[Any]:
+    return PACKAGE["staging_gui_host_processes"](processes)
+
+
+def staging_owned_processes(processes: Iterable[Any] | None = None) -> list[Any]:
+    return PACKAGE["staging_owned_processes"](processes)
+
+
+def descendants(roots: Iterable[Any], processes: Iterable[Any]) -> list[Any]:
+    result: list[Any] = []
+    parent_ids = {item.pid for item in roots}
+    remaining = list(processes)
+    while parent_ids:
+        children = [item for item in remaining if item.parent_pid in parent_ids]
+        if not children:
+            break
+        result.extend(children)
+        child_ids = {item.pid for item in children}
+        remaining = [item for item in remaining if item.pid not in child_ids]
+        parent_ids = child_ids
+    return result
+
+
+def process_key(process: Any) -> tuple[int, str, str]:
+    return process.pid, process.started, process.command
+
+
+def process_is_current(identity: Any, processes: Iterable[Any]) -> bool:
+    expected = process_key(identity)
+    return any(process_key(item) == expected for item in processes)
+
+
+def wait_for_process_exit(identities: Iterable[Any], timeout_seconds: float) -> None:
+    expected = list(identities)
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        current = process_snapshot()
+        if not any(process_is_current(item, current) for item in expected):
+            return
+        time.sleep(0.05)
+    remaining = [
+        item.pid for item in expected
+        if process_is_current(item, process_snapshot())
+    ]
+    raise DevRebuildLiveError(
+        f"process exit timed out (pids={','.join(map(str, remaining))})"
+    )
+
+
+def load_helper_manifest(path: Path) -> dict[str, Any] | None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    require(
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == os.geteuid()
+        and metadata.st_nlink == 1,
+        "unsafe helper manifest node",
+    )
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb", closefd=True) as file:
+        data = file.read(1_048_577)
+    require(len(data) <= 1_048_576, "helper manifest byte cap")
+    value = json.loads(data)
+    require(isinstance(value, dict), "helper manifest object")
+    helper_canonical = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    require(data == helper_canonical, "helper manifest canonical bytes")
+    return value
+
+
+def related_processes(
+    canonical_udid: str,
+    hosts: Iterable[Any],
+    processes: Iterable[Any],
+) -> list[Any]:
+    snapshot = list(processes)
+    result = list(hosts) + descendants(hosts, snapshot)
+    manifest = load_helper_manifest(target_paths(canonical_udid)["helperManifest"])
+    if manifest is not None:
+        manifest_pids = {manifest.get("runtimePID")}
+        helpers = manifest.get("helpers", [])
+        if isinstance(helpers, list):
+            manifest_pids.update(
+                item.get("pid") for item in helpers if isinstance(item, dict)
+            )
+        result.extend(item for item in snapshot if item.pid in manifest_pids)
+    unique: dict[tuple[int, str, str], Any] = {}
+    for item in result:
+        unique[process_key(item)] = item
+    return list(unique.values())
+
+
+def scoped_staging_processes(
+    canonical_udid: str,
+    processes: Iterable[Any],
+) -> tuple[list[Any], list[Any]]:
+    snapshot = list(processes)
+    hosts = staging_gui_hosts(snapshot)
+    require(len(hosts) <= 1, "multiple staging GUIHost processes")
+    related = related_processes(canonical_udid, hosts, snapshot)
+    related_keys = {process_key(item) for item in related}
+    foreign = [
+        item for item in staging_owned_processes(snapshot)
+        if process_key(item) not in related_keys
+    ]
+    require(
+        not foreign,
+        "staging processes outside requested Live scope "
+        f"(pids={','.join(str(item.pid) for item in foreign)})",
+    )
+    return hosts, related
+
+
+def run_product_cli(
+    executable: Path,
+    arguments: list[str],
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    completed = subprocess.run(
+        [str(executable), *arguments, "--json"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+    elapsed_ms = round((time.monotonic() - started) * 1_000, 3)
+    log_event(
+        "productCLI",
+        arguments=arguments,
+        elapsedMs=elapsed_ms,
+        executable=str(executable),
+        exitCode=completed.returncode,
+        stderr=completed.stderr.strip(),
+    )
+    require(completed.returncode == 0, f"product CLI failed: {' '.join(arguments)}")
+    value = json.loads(completed.stdout)
+    require(isinstance(value, dict) and value.get("ok") is True, "product CLI result")
+    return value
+
+
+def lock_is_free(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return True
+    require(
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == os.geteuid()
+        and metadata.st_nlink == 1,
+        f"unsafe lock node: {path}",
+    )
+    descriptor = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return True
+    finally:
+        os.close(descriptor)
+
+
+def cleanup_complete(canonical_udid: str, identities: Iterable[Any]) -> bool:
+    paths = target_paths(canonical_udid)
+    current = process_snapshot()
+    return (
+        not any(process_is_current(item, current) for item in identities)
+        and not paths["runtimeSocket"].exists()
+        and not paths["helperManifest"].exists()
+        and lock_is_free(paths["runtimeLock"])
+        and lock_is_free(paths["bootstrapLock"])
+    )
+
+
+def wait_for_cleanup(
+    canonical_udid: str,
+    identities: Iterable[Any],
+    timeout_seconds: float,
+) -> None:
+    expected = list(identities)
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if cleanup_complete(canonical_udid, expected):
+            return
+        time.sleep(0.05)
+    raise DevRebuildLiveError("Runtime, Helper, socket, or manifest cleanup timed out")
+
+
+def app_content_hash(app: Path) -> str | None:
+    if not app.exists():
+        return None
+    manifest = PACKAGE["content_manifest"](app)
+    return hashlib.sha256(
+        PACKAGE["APP_CONTENT_DOMAIN"] + canonical_bytes(manifest)
+    ).hexdigest()
+
+
+class LiveRebuildOrchestrator:
+    def __init__(self, canonical_udid: str, ready_timeout_seconds: float) -> None:
+        self.canonical_udid = canonical_udid
+        self.ready_timeout_seconds = ready_timeout_seconds
+        scoped_staging_processes(canonical_udid, process_snapshot())
+        self.old_app_content_hash = app_content_hash(STAGING_APP)
+        self.old_processes: list[Any] = []
+        self.new_app_content_hash: str | None = None
+
+    def before_publish(self, new_app_content_hash: str) -> None:
+        snapshot = process_snapshot()
+        hosts, related = scoped_staging_processes(self.canonical_udid, snapshot)
+        self.old_processes = related
+        self.new_app_content_hash = new_app_content_hash
+        log_event(
+            "publicationBarrier",
+            canonicalUDID=self.canonical_udid,
+            newAppContentHash=new_app_content_hash,
+            oldAppContentHash=self.old_app_content_hash,
+            processes=[{
+                "command": item.command,
+                "parentPID": item.parent_pid,
+                "pid": item.pid,
+                "processGroupID": item.process_group_id,
+                "started": item.started,
+            } for item in related],
+        )
+
+        for host in hosts:
+            if process_is_current(host, process_snapshot()):
+                os.kill(host.pid, signal.SIGTERM)
+        wait_for_process_exit(hosts, 10.0)
+
+        if STAGING_EXECUTABLE.exists():
+            stop = run_product_cli(
+                STAGING_EXECUTABLE,
+                ["stop", "--udid", self.canonical_udid],
+                20.0,
+            )
+            disposition = stop.get("result", {}).get("disposition")
+            require(
+                disposition in {"alreadyStopped", "stopped"},
+                "Runtime stop disposition",
+            )
+        elif related:
+            raise DevRebuildLiveError("staging executable missing for active processes")
+
+        wait_for_cleanup(self.canonical_udid, related, 20.0)
+        require(not staging_gui_hosts(), "staging GUIHost restarted during cleanup")
+        log_event(
+            "cleanupComplete",
+            canonicalUDID=self.canonical_udid,
+            processCount=len(related),
+        )
+
+    def launch_and_wait_ready(self) -> dict[str, Any]:
+        launch = run_product_cli(
+            STAGING_EXECUTABLE,
+            ["live", "--udid", self.canonical_udid],
+            15.0,
+        )
+        disposition = launch.get("result", {}).get("disposition")
+        require(disposition in {"focused", "opened"}, "Live launch disposition")
+
+        deadline = time.monotonic() + self.ready_timeout_seconds
+        while time.monotonic() < deadline:
+            projection = self.ready_projection()
+            if projection is not None:
+                status = run_product_cli(
+                    STAGING_EXECUTABLE,
+                    ["runtime", "status", "--udid", self.canonical_udid],
+                    5.0,
+                )
+                targets = status.get("result", {}).get("targets", [])
+                if len(targets) == 1 and targets[0].get("state") == "full":
+                    log_event("liveReady", **projection)
+                    return projection
+            time.sleep(0.1)
+        raise DevRebuildLiveError("new Live did not reach post-capture Helper readiness")
+
+    def ready_projection(self) -> dict[str, Any] | None:
+        snapshot = process_snapshot()
+        hosts = staging_gui_hosts(snapshot)
+        if len(hosts) != 1:
+            return None
+        old_keys = {process_key(item) for item in self.old_processes}
+        if process_key(hosts[0]) in old_keys:
+            return None
+        manifest = load_helper_manifest(
+            target_paths(self.canonical_udid)["helperManifest"]
+        )
+        if manifest is None or manifest.get("schemaVersion") != 1:
+            return None
+        helpers = manifest.get("helpers")
+        if not isinstance(helpers, list) or not helpers:
+            return None
+        by_pid = {item.pid: item for item in snapshot}
+        runtime_pid = manifest.get("runtimePID")
+        runtime = by_pid.get(runtime_pid)
+        expected_runtime = (
+            str(STAGING_RUNTIME) + " --canonical-udid " + self.canonical_udid
+        )
+        if runtime is None or runtime.command != expected_runtime:
+            return None
+        if process_key(runtime) in old_keys:
+            return None
+        helper_projections = []
+        for helper in helpers:
+            if not isinstance(helper, dict):
+                return None
+            process = by_pid.get(helper.get("pid"))
+            executable_path = helper.get("executablePath")
+            if process is None or not isinstance(executable_path, str):
+                return None
+            if not executable_path.startswith(str(STAGING_APP) + "/"):
+                return None
+            if not process.command.startswith(executable_path + " "):
+                return None
+            if process_key(process) in old_keys:
+                return None
+            helper_projections.append({
+                "executorGeneration": helper.get("executorGeneration"),
+                "pid": process.pid,
+            })
+        return {
+            "appContentHash": self.new_app_content_hash,
+            "canonicalUDID": self.canonical_udid,
+            "guiHostPID": hosts[0].pid,
+            "helpers": helper_projections,
+            "runtimeEpoch": manifest.get("runtimeEpoch"),
+            "runtimePID": runtime.pid,
+        }
+
+
+def self_test() -> dict[str, Any]:
+    target = "00008110-001A7D523E90401E"
+    process_target = "DEV-REBUILD-SELF-TEST"
+    require(normalize_udid(target.lower()) == target, "UDID normalization")
+    require(
+        domain_hash("pulsephone.udid.v1", target)
+        == "f83bdcdc25599ff619122839904cb40845bb11784a1c543f362d523a5db72298",
+        "UDID domain hash",
+    )
+    fake = PACKAGE["parse_process_snapshot"](
+        "101 1 101 501 Mon Jul 27 10:23:52 2026 "
+        + str(STAGING_EXECUTABLE) + " --gui-host\n"
+        "102 101 101 501 Mon Jul 27 10:23:53 2026 "
+        + str(STAGING_RUNTIME) + " --canonical-udid " + process_target + "\n"
+        "103 102 103 501 Mon Jul 27 10:23:54 2026 "
+        + str(STAGING_APP / "Contents/Helpers/PulsePhoneCoreDeviceHelper")
+        + " --runtime-epoch 1 --connection-epoch 1 --executor-generation 1\n"
+    )
+    hosts = staging_gui_hosts(fake)
+    require([item.pid for item in hosts] == [101], "GUIHost selection")
+    require(
+        [item.pid for item in descendants(hosts, fake)] == [102, 103],
+        "process descendants",
+    )
+    scoped_hosts, scoped_related = scoped_staging_processes(process_target, fake)
+    require(
+        [item.pid for item in scoped_hosts] == [101]
+        and [item.pid for item in scoped_related] == [101, 102, 103],
+        "scoped staging processes",
+    )
+    paths = target_paths(target)
+    require(
+        paths["runtimeSocket"].name
+        == "f83bdcdc25599ff619122839904cb40845bb11784a1c543f362d523a5db72298.sock",
+        "target cleanup paths",
+    )
+    return {"outcome": "passed", "schemaVersion": 1, "tests": 6}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="dev-rebuild-live")
+    parser.add_argument("--development-signing-identity")
+    parser.add_argument("--objects-root", default="build/evidence/objects")
+    parser.add_argument("--ready-timeout-seconds", type=float, default=30.0)
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--udid")
+    arguments = parser.parse_args()
+    if arguments.self_test:
+        require(arguments.udid is None, "--self-test does not accept --udid")
+        result = self_test()
+    else:
+        require(arguments.udid is not None, "--udid is required")
+        require(
+            1.0 <= arguments.ready_timeout_seconds <= 120.0,
+            "ready timeout range",
+        )
+        orchestrator = LiveRebuildOrchestrator(
+            normalize_udid(arguments.udid),
+            arguments.ready_timeout_seconds,
+        )
+        package_result = PACKAGE["package_app"](
+            arguments.objects_root,
+            arguments.development_signing_identity,
+            before_publish=orchestrator.before_publish,
+            allow_active_staging=True,
+        )
+        ready = orchestrator.launch_and_wait_ready()
+        result = {
+            **package_result,
+            "devLive": ready,
+        }
+    sys.stdout.buffer.write(canonical_bytes(result) + b"\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (
+        DevRebuildLiveError,
+        json.JSONDecodeError,
+        OSError,
+        PackagingError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ) as error:
+        print(f"dev-rebuild-live: {error}", file=sys.stderr)
+        raise SystemExit(2)

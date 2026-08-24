@@ -1,0 +1,713 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+from pathlib import Path
+from typing import Any
+
+
+PROTOCOL = "pulsephone.element-ground-truth-evaluation.v1"
+MAX_INPUT_BYTES = 64 * 1024 * 1024
+MAX_CASES = 10_000
+MAX_ELEMENTS_PER_CASE = 256
+MINIMUM_RELEASE_CASES = 100
+ELEMENT_TYPES = ("controlCandidate", "text", "unknown")
+VISUAL_KINDS = ("icon", "mixed", "text", "unknown")
+UNKNOWN_FIELDS = ("enabled", "hittable", "identifier", "selected")
+
+
+class EvaluationError(ValueError):
+    pass
+
+
+def _reject_constant(value: str) -> None:
+    raise EvaluationError(f"non-finite JSON number: {value}")
+
+
+def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in output:
+            raise EvaluationError(f"duplicate JSON key: {key}")
+        output[key] = value
+    return output
+
+
+def load_document(path: Path) -> tuple[dict[str, Any], str]:
+    data = path.read_bytes()
+    if not data or len(data) > MAX_INPUT_BYTES:
+        raise EvaluationError("input size is outside the allowed range")
+    try:
+        document = json.loads(
+            data,
+            object_pairs_hook=_object,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise EvaluationError("input is not strict UTF-8 JSON") from error
+    if not isinstance(document, dict):
+        raise EvaluationError("input root must be an object")
+    return document, hashlib.sha256(data).hexdigest()
+
+
+def require_exact_keys(
+    value: dict[str, Any],
+    required: set[str],
+    optional: set[str] = frozenset(),
+) -> None:
+    keys = set(value)
+    if not required.issubset(keys) or not keys.issubset(required | optional):
+        raise EvaluationError("object keys do not match the versioned contract")
+
+
+def require_token(value: Any, name: str, maximum: int = 128) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > maximum
+        or any(ord(character) < 0x20 for character in value)
+    ):
+        raise EvaluationError(f"invalid {name}")
+    return value
+
+
+def require_number(value: Any, name: str, minimum: float = 0.0) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise EvaluationError(f"invalid {name}")
+    output = float(value)
+    if not math.isfinite(output) or output < minimum:
+        raise EvaluationError(f"invalid {name}")
+    return output
+
+
+def require_integer(value: Any, name: str, minimum: int = 1) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise EvaluationError(f"invalid {name}")
+    return value
+
+
+def validate_rect(value: Any, width: float, height: float) -> dict[str, float]:
+    if not isinstance(value, dict):
+        raise EvaluationError("frame must be an object")
+    require_exact_keys(value, {"height", "width", "x", "y"})
+    output = {
+        key: require_number(value[key], f"frame.{key}")
+        for key in ("x", "y", "width", "height")
+    }
+    if output["width"] <= 0 or output["height"] <= 0:
+        raise EvaluationError("frame dimensions must be positive")
+    if output["x"] + output["width"] > width:
+        raise EvaluationError("frame exceeds viewport width")
+    if output["y"] + output["height"] > height:
+        raise EvaluationError("frame exceeds viewport height")
+    return output
+
+
+def validate_point(
+    value: Any,
+    frame: dict[str, float],
+    name: str,
+) -> dict[str, float]:
+    if not isinstance(value, dict):
+        raise EvaluationError(f"{name} must be an object")
+    require_exact_keys(value, {"x", "y"})
+    output = {
+        "x": require_number(value["x"], f"{name}.x"),
+        "y": require_number(value["y"], f"{name}.y"),
+    }
+    if not (
+        frame["x"] <= output["x"] <= frame["x"] + frame["width"]
+        and frame["y"] <= output["y"] <= frame["y"] + frame["height"]
+    ):
+        raise EvaluationError(f"{name} must be inside its frame")
+    return output
+
+
+def validate_viewport(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        raise EvaluationError("viewport must be an object")
+    require_exact_keys(
+        value,
+        {"logicalHeight", "logicalWidth", "pixelHeight", "pixelWidth"},
+    )
+    return {
+        "pixelWidth": float(require_integer(value["pixelWidth"], "pixelWidth")),
+        "pixelHeight": float(require_integer(value["pixelHeight"], "pixelHeight")),
+        "logicalWidth": require_number(value["logicalWidth"], "logicalWidth", 0.000001),
+        "logicalHeight": require_number(value["logicalHeight"], "logicalHeight", 0.000001),
+    }
+
+
+def validate_ground_truth(document: dict[str, Any]) -> dict[str, Any]:
+    require_exact_keys(
+        document,
+        {"cases", "datasetID", "privacyClassification", "schemaVersion"},
+        {"privacyApprovalID"},
+    )
+    if document["schemaVersion"] != 1:
+        raise EvaluationError("unsupported ground-truth schemaVersion")
+    dataset_id = require_token(document["datasetID"], "datasetID")
+    privacy = document["privacyClassification"]
+    if privacy not in ("approvedReal", "synthetic"):
+        raise EvaluationError("invalid privacyClassification")
+    approval_id = document.get("privacyApprovalID")
+    if privacy == "approvedReal":
+        require_token(approval_id, "privacyApprovalID")
+    elif approval_id is not None:
+        raise EvaluationError("synthetic ground truth cannot claim privacy approval")
+    cases = document["cases"]
+    if not isinstance(cases, list) or not 1 <= len(cases) <= MAX_CASES:
+        raise EvaluationError("invalid ground-truth case count")
+    seen_cases: set[str] = set()
+    normalized_cases: list[dict[str, Any]] = []
+    for case in cases:
+        if not isinstance(case, dict):
+            raise EvaluationError("ground-truth case must be an object")
+        require_exact_keys(case, {"caseID", "elements", "viewport"})
+        case_id = require_token(case["caseID"], "caseID")
+        if case_id in seen_cases:
+            raise EvaluationError("duplicate ground-truth caseID")
+        seen_cases.add(case_id)
+        viewport = validate_viewport(case["viewport"])
+        elements = case["elements"]
+        if not isinstance(elements, list) or len(elements) > MAX_ELEMENTS_PER_CASE:
+            raise EvaluationError("invalid ground-truth element count")
+        seen_truth: set[str] = set()
+        normalized_elements: list[dict[str, Any]] = []
+        for element in elements:
+            if not isinstance(element, dict):
+                raise EvaluationError("ground-truth element must be an object")
+            require_exact_keys(
+                element,
+                {
+                    "elementType",
+                    "expectedUnknown",
+                    "frame",
+                    "tapTarget",
+                    "truthID",
+                    "visualKind",
+                },
+            )
+            truth_id = require_token(element["truthID"], "truthID")
+            if truth_id in seen_truth:
+                raise EvaluationError("duplicate truthID")
+            seen_truth.add(truth_id)
+            element_type = element["elementType"]
+            if element_type not in ELEMENT_TYPES:
+                raise EvaluationError("invalid ground-truth elementType")
+            visual_kind = element["visualKind"]
+            if visual_kind not in VISUAL_KINDS:
+                raise EvaluationError("invalid ground-truth visualKind")
+            expected_unknown = element["expectedUnknown"]
+            if (
+                not isinstance(expected_unknown, list)
+                or len(expected_unknown) != len(set(expected_unknown))
+                or any(field not in UNKNOWN_FIELDS for field in expected_unknown)
+            ):
+                raise EvaluationError("invalid expectedUnknown fields")
+            frame = validate_rect(
+                element["frame"],
+                viewport["pixelWidth"],
+                viewport["pixelHeight"],
+            )
+            normalized_elements.append({
+                "truthID": truth_id,
+                "elementType": element_type,
+                "expectedUnknown": sorted(expected_unknown),
+                "frame": frame,
+                "tapTarget": validate_point(element["tapTarget"], frame, "tapTarget"),
+                "visualKind": visual_kind,
+            })
+        normalized_cases.append({
+            "caseID": case_id,
+            "elements": normalized_elements,
+            "viewport": viewport,
+        })
+    return {
+        "datasetID": dataset_id,
+        "privacyClassification": privacy,
+        "privacyApprovalPresent": approval_id is not None,
+        "cases": normalized_cases,
+    }
+
+
+def validate_prediction_element(
+    element: Any,
+    viewport: dict[str, float],
+) -> dict[str, Any]:
+    if not isinstance(element, dict):
+        raise EvaluationError("prediction element must be an object")
+    is_production_shape = "snapshotID" in element
+    if is_production_shape:
+        require_exact_keys(
+            element,
+            {
+                "center",
+                "confidence",
+                "elementType",
+                "enabled",
+                "frame",
+                "hittable",
+                "identifier",
+                "label",
+                "labelSource",
+                "selected",
+                "snapshotID",
+                "sources",
+                "trackingID",
+            },
+        )
+    else:
+        require_exact_keys(
+            element,
+            {
+                "center",
+                "confidence",
+                "elementType",
+                "enabled",
+                "frame",
+                "hittable",
+                "identifier",
+                "predictionID",
+                "selected",
+            },
+        )
+    element_type = element["elementType"]
+    if element_type not in ELEMENT_TYPES:
+        raise EvaluationError("invalid prediction elementType")
+    confidence = element["confidence"]
+    if confidence is not None:
+        confidence = require_number(confidence, "confidence")
+        if confidence > 1:
+            raise EvaluationError("confidence exceeds one")
+    if is_production_shape:
+        frame_value = element["frame"]
+        center_value = element["center"]
+        if not isinstance(frame_value, dict) or not isinstance(center_value, dict):
+            raise EvaluationError("production frame and center must be objects")
+        coordinate_keys = {"logicalPoints", "normalized", "pixel"}
+        require_exact_keys(frame_value, coordinate_keys)
+        require_exact_keys(center_value, coordinate_keys)
+        frame = validate_rect(
+            frame_value["pixel"],
+            viewport["pixelWidth"],
+            viewport["pixelHeight"],
+        )
+        logical_frame = validate_rect(
+            frame_value["logicalPoints"],
+            viewport["logicalWidth"],
+            viewport["logicalHeight"],
+        )
+        normalized_frame = validate_rect(frame_value["normalized"], 1.0, 1.0)
+        center = validate_point(center_value["pixel"], frame, "center.pixel")
+        center_logical = validate_point(
+            center_value["logicalPoints"], logical_frame, "center.logicalPoints"
+        )
+        center_normalized = validate_point(
+            center_value["normalized"], normalized_frame, "center.normalized"
+        )
+        prediction_id = require_token(element["snapshotID"], "snapshotID")
+    else:
+        frame = validate_rect(
+            element["frame"],
+            viewport["pixelWidth"],
+            viewport["pixelHeight"],
+        )
+        center = validate_point(element["center"], frame, "center")
+        center_logical = {
+            "x": center["x"] * viewport["logicalWidth"] / viewport["pixelWidth"],
+            "y": center["y"] * viewport["logicalHeight"] / viewport["pixelHeight"],
+        }
+        center_normalized = {
+            "x": center["x"] / viewport["pixelWidth"],
+            "y": center["y"] / viewport["pixelHeight"],
+        }
+        prediction_id = require_token(element["predictionID"], "predictionID")
+    coordinate_pairs = (
+        (center, frame, "pixel"),
+        (
+            center_logical,
+            logical_frame if is_production_shape else {
+                "x": frame["x"] * viewport["logicalWidth"] / viewport["pixelWidth"],
+                "y": frame["y"] * viewport["logicalHeight"] / viewport["pixelHeight"],
+                "width": frame["width"] * viewport["logicalWidth"] / viewport["pixelWidth"],
+                "height": frame["height"] * viewport["logicalHeight"] / viewport["pixelHeight"],
+            },
+            "logicalPoints",
+        ),
+        (
+            center_normalized,
+            normalized_frame if is_production_shape else {
+                "x": frame["x"] / viewport["pixelWidth"],
+                "y": frame["y"] / viewport["pixelHeight"],
+                "width": frame["width"] / viewport["pixelWidth"],
+                "height": frame["height"] / viewport["pixelHeight"],
+            },
+            "normalized",
+        ),
+    )
+    for coordinate_center, coordinate_frame, coordinate_name in coordinate_pairs:
+        expected_center = {
+            "x": coordinate_frame["x"] + coordinate_frame["width"] / 2,
+            "y": coordinate_frame["y"] + coordinate_frame["height"] / 2,
+        }
+        if math.dist(
+            (coordinate_center["x"], coordinate_center["y"]),
+            (expected_center["x"], expected_center["y"]),
+        ) > 1e-6:
+            raise EvaluationError(
+                f"prediction {coordinate_name} center is not the exact frame center"
+            )
+    return {
+        "predictionID": prediction_id,
+        "elementType": element_type,
+        "confidence": confidence,
+        "frame": frame,
+        "center": center,
+        "centerLogical": center_logical,
+        "centerNormalized": center_normalized,
+        **{field: element[field] for field in UNKNOWN_FIELDS},
+    }
+
+
+def validate_predictions(
+    document: dict[str, Any],
+    ground_truth: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    require_exact_keys(document, {"cases", "datasetID", "schemaVersion"})
+    if document["schemaVersion"] != 1:
+        raise EvaluationError("unsupported prediction schemaVersion")
+    if document["datasetID"] != ground_truth["datasetID"]:
+        raise EvaluationError("prediction datasetID does not match ground truth")
+    cases = document["cases"]
+    if not isinstance(cases, list) or len(cases) != len(ground_truth["cases"]):
+        raise EvaluationError("prediction cases do not match ground truth")
+    truth_by_case = {case["caseID"]: case for case in ground_truth["cases"]}
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for case in cases:
+        if not isinstance(case, dict):
+            raise EvaluationError("prediction case must be an object")
+        require_exact_keys(case, {"caseID", "elements"}, {"baselineElements"})
+        case_id = require_token(case["caseID"], "caseID")
+        if case_id not in truth_by_case or case_id in normalized:
+            raise EvaluationError("unknown or duplicate prediction caseID")
+        viewport = truth_by_case[case_id]["viewport"]
+        normalized_case: dict[str, list[dict[str, Any]]] = {}
+        for key in ("elements", "baselineElements"):
+            if key not in case:
+                continue
+            elements = case[key]
+            if not isinstance(elements, list) or len(elements) > MAX_ELEMENTS_PER_CASE:
+                raise EvaluationError("invalid prediction element count")
+            values = [validate_prediction_element(element, viewport) for element in elements]
+            ids = [element["predictionID"] for element in values]
+            if len(ids) != len(set(ids)):
+                raise EvaluationError("duplicate predictionID")
+            normalized_case[key] = values
+        normalized[case_id] = normalized_case
+    if set(normalized) != set(truth_by_case):
+        raise EvaluationError("prediction case set does not match ground truth")
+    return normalized
+
+
+def area(frame: dict[str, float]) -> float:
+    return frame["width"] * frame["height"]
+
+
+def iou(left: dict[str, float], right: dict[str, float]) -> float:
+    min_x = max(left["x"], right["x"])
+    min_y = max(left["y"], right["y"])
+    max_x = min(left["x"] + left["width"], right["x"] + right["width"])
+    max_y = min(left["y"] + left["height"], right["y"] + right["height"])
+    overlap = max(0.0, max_x - min_x) * max(0.0, max_y - min_y)
+    if overlap == 0:
+        return 0.0
+    return overlap / (area(left) + area(right) - overlap)
+
+
+def match_case(
+    truth: list[dict[str, Any]],
+    predictions: list[dict[str, Any]],
+    threshold: float,
+) -> list[tuple[dict[str, Any], dict[str, Any], float]]:
+    available = set(range(len(truth)))
+    ordered = sorted(
+        enumerate(predictions),
+        key=lambda item: (
+            -(item[1]["confidence"] if item[1]["confidence"] is not None else -1),
+            item[0],
+        ),
+    )
+    matches: list[tuple[dict[str, Any], dict[str, Any], float]] = []
+    for _, prediction in ordered:
+        candidates = [
+            (iou(prediction["frame"], truth[index]["frame"]), index)
+            for index in available
+            if prediction["elementType"] == truth[index]["elementType"]
+        ]
+        if not candidates:
+            continue
+        score, index = max(candidates, key=lambda value: (value[0], -value[1]))
+        if score < threshold:
+            continue
+        available.remove(index)
+        matches.append((truth[index], prediction, score))
+    return matches
+
+
+def rounded(value: float) -> float:
+    return round(value, 6)
+
+
+def ratio(numerator: int, denominator: int) -> float | None:
+    return None if denominator == 0 else rounded(numerator / denominator)
+
+
+def aggregate(
+    cases: list[dict[str, Any]],
+    predictions: dict[str, list[dict[str, Any]]],
+    threshold: float,
+) -> dict[str, Any]:
+    truth_count = 0
+    prediction_count = 0
+    matches: list[tuple[dict[str, Any], dict[str, Any], float, dict[str, float]]] = []
+    for case in cases:
+        case_predictions = predictions[case["caseID"]]
+        truth_count += len(case["elements"])
+        prediction_count += len(case_predictions)
+        matches.extend(
+            (truth, prediction, score, case["viewport"])
+            for truth, prediction, score in match_case(
+                case["elements"], case_predictions, threshold
+            )
+        )
+    ious = [match[2] for match in matches]
+    pixel_errors = [
+        math.dist(
+            (truth["tapTarget"]["x"], truth["tapTarget"]["y"]),
+            (prediction["center"]["x"], prediction["center"]["y"]),
+        )
+        for truth, prediction, _, _ in matches
+    ]
+    logical_errors = [
+        math.dist(
+            (
+                truth["tapTarget"]["x"] * viewport["logicalWidth"] / viewport["pixelWidth"],
+                truth["tapTarget"]["y"] * viewport["logicalHeight"] / viewport["pixelHeight"],
+            ),
+            (
+                prediction["centerLogical"]["x"],
+                prediction["centerLogical"]["y"],
+            ),
+        )
+        for truth, prediction, _, viewport in matches
+    ]
+    normalized_errors = [
+        math.dist(
+            (
+                truth["tapTarget"]["x"] / viewport["pixelWidth"],
+                truth["tapTarget"]["y"] / viewport["pixelHeight"],
+            ),
+            (
+                prediction["centerNormalized"]["x"],
+                prediction["centerNormalized"]["y"],
+            ),
+        )
+        for truth, prediction, _, viewport in matches
+    ]
+    unknown_total = 0
+    unknown_correct = 0
+    for truth, prediction, _, _ in matches:
+        for field in truth["expectedUnknown"]:
+            unknown_total += 1
+            if prediction[field] is None:
+                unknown_correct += 1
+    return {
+        "falseNegativeCount": truth_count - len(matches),
+        "falsePositiveCount": prediction_count - len(matches),
+        "matchedCount": len(matches),
+        "meanIoU": None if not ious else rounded(sum(ious) / len(ious)),
+        "meanLogicalPointTapError": None if not logical_errors else rounded(sum(logical_errors) / len(logical_errors)),
+        "meanNormalizedTapError": None if not normalized_errors else rounded(sum(normalized_errors) / len(normalized_errors)),
+        "meanPixelTapError": None if not pixel_errors else rounded(sum(pixel_errors) / len(pixel_errors)),
+        "precision": ratio(len(matches), prediction_count),
+        "predictionCount": prediction_count,
+        "recall": ratio(len(matches), truth_count),
+        "truthCount": truth_count,
+        "unknownSemanticAccuracy": ratio(unknown_correct, unknown_total),
+        "unknownSemanticFieldCount": unknown_total,
+    }
+
+
+def coverage_by_visual_kind(
+    cases: list[dict[str, Any]],
+    predictions: dict[str, list[dict[str, Any]]],
+    threshold: float,
+) -> dict[str, Any]:
+    truth_counts = {kind: 0 for kind in VISUAL_KINDS}
+    scores: dict[str, list[float]] = {kind: [] for kind in VISUAL_KINDS}
+    for case in cases:
+        for truth in case["elements"]:
+            truth_counts[truth["visualKind"]] += 1
+        for truth, _, score in match_case(
+            case["elements"], predictions[case["caseID"]], threshold
+        ):
+            scores[truth["visualKind"]].append(score)
+    return {
+        kind: {
+            "matchedCount": len(scores[kind]),
+            "meanIoU": None if not scores[kind]
+                else rounded(sum(scores[kind]) / len(scores[kind])),
+            "recall": ratio(len(scores[kind]), truth_counts[kind]),
+            "truthCount": truth_counts[kind],
+        }
+        for kind in VISUAL_KINDS
+    }
+
+
+def evaluate_documents(
+    ground_truth_document: dict[str, Any],
+    prediction_document: dict[str, Any],
+    ground_truth_sha256: str,
+    prediction_sha256: str,
+    threshold: float = 0.5,
+) -> dict[str, Any]:
+    if not math.isfinite(threshold) or not 0 < threshold <= 1:
+        raise EvaluationError("IoU threshold must be in (0,1]")
+    ground_truth = validate_ground_truth(ground_truth_document)
+    predictions = validate_predictions(prediction_document, ground_truth)
+    final_by_case = {
+        case_id: value["elements"] for case_id, value in predictions.items()
+    }
+    overall = aggregate(ground_truth["cases"], final_by_case, threshold)
+    by_type: dict[str, Any] = {}
+    for element_type in ELEMENT_TYPES:
+        typed_cases = [
+            {
+                **case,
+                "elements": [
+                    element for element in case["elements"]
+                    if element["elementType"] == element_type
+                ],
+            }
+            for case in ground_truth["cases"]
+        ]
+        typed_predictions = {
+            case_id: [
+                element for element in elements
+                if element["elementType"] == element_type
+            ]
+            for case_id, elements in final_by_case.items()
+        }
+        by_type[element_type] = aggregate(typed_cases, typed_predictions, threshold)
+    visual_coverage = coverage_by_visual_kind(
+        ground_truth["cases"], final_by_case, threshold
+    )
+
+    correction_case_ids = [
+        case["caseID"] for case in ground_truth["cases"]
+        if "baselineElements" in predictions[case["caseID"]]
+    ]
+    correction: dict[str, Any]
+    if correction_case_ids:
+        correction_cases = [
+            case for case in ground_truth["cases"]
+            if case["caseID"] in correction_case_ids
+        ]
+        baseline = aggregate(
+            correction_cases,
+            {
+                case_id: predictions[case_id]["baselineElements"]
+                for case_id in correction_case_ids
+            },
+            threshold,
+        )
+        final = aggregate(
+            correction_cases,
+            {case_id: final_by_case[case_id] for case_id in correction_case_ids},
+            threshold,
+        )
+        correction = {
+            "baseline": baseline,
+            "caseCount": len(correction_case_ids),
+            "final": final,
+            "meanIoUGain": None if baseline["meanIoU"] is None or final["meanIoU"] is None
+                else rounded(final["meanIoU"] - baseline["meanIoU"]),
+            "recallGain": None if baseline["recall"] is None or final["recall"] is None
+                else rounded(final["recall"] - baseline["recall"]),
+        }
+    else:
+        correction = {
+            "baseline": None,
+            "caseCount": 0,
+            "final": None,
+            "meanIoUGain": None,
+            "recallGain": None,
+        }
+
+    case_count = len(ground_truth["cases"])
+    if ground_truth["privacyClassification"] != "approvedReal":
+        release_reason = "syntheticDataset"
+    elif case_count < MINIMUM_RELEASE_CASES:
+        release_reason = "insufficientCaseCount"
+    else:
+        release_reason = None
+    return {
+        "byType": by_type,
+        "caseCount": case_count,
+        "correction": correction,
+        "coverageByVisualKind": visual_coverage,
+        "datasetID": ground_truth["datasetID"],
+        "inputDigests": {
+            "groundTruthSHA256": ground_truth_sha256,
+            "predictionsSHA256": prediction_sha256,
+        },
+        "iouThreshold": rounded(threshold),
+        "metrics": overall,
+        "privacyClassification": ground_truth["privacyClassification"],
+        "protocol": PROTOCOL,
+        "releaseGate": {
+            "datasetCriteriaSatisfied": release_reason is None,
+            "minimumCaseCount": MINIMUM_RELEASE_CASES,
+            "privacyApprovalPresent": ground_truth["privacyApprovalPresent"],
+            "reason": release_reason,
+        },
+        "schemaVersion": 1,
+    }
+
+
+def encode_report(report: dict[str, Any]) -> bytes:
+    return (json.dumps(
+        report,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ) + "\n").encode("utf-8")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ground-truth", required=True, type=Path)
+    parser.add_argument("--predictions", required=True, type=Path)
+    parser.add_argument("--iou-threshold", type=float, default=0.5)
+    arguments = parser.parse_args()
+    ground_truth, ground_truth_sha256 = load_document(arguments.ground_truth)
+    predictions, predictions_sha256 = load_document(arguments.predictions)
+    report = evaluate_documents(
+        ground_truth,
+        predictions,
+        ground_truth_sha256,
+        predictions_sha256,
+        arguments.iou_threshold,
+    )
+    print(encode_report(report).decode("utf-8"), end="")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

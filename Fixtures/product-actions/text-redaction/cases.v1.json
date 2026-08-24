@@ -1,0 +1,1 @@
+{"cases":[{"caseID":"multibyte-user-content","expectedTextRedacted":true,"expectedUTF8ByteCount":21,"text":"secret-用户-content"}],"schemaVersion":1}

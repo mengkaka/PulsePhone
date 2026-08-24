@@ -1,0 +1,1 @@
+{"commandID":"touch.tap","events":["initialPlan","registerWaiter","attemptReady","resumePlanning"],"initialRevision":1,"readyRevision":2}

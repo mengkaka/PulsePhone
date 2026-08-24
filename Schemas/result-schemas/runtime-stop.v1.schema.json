@@ -1,0 +1,1 @@
+{"$id":"runtimeStopResult.v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"disposition":{"enum":["alreadyStopped","stopped"],"type":"string"},"stoppedTargetCount":{"minimum":0,"type":"integer"}},"required":["disposition","stoppedTargetCount"],"type":"object","x-pulsephone-maxEncodedBytes":8192}

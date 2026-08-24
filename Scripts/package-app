@@ -1,0 +1,1413 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import plistlib
+import re
+import shutil
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Iterable
+
+
+ROOT = Path(__file__).resolve().parents[1]
+BUILD = ROOT / "build"
+STAGING = BUILD / "staging"
+LOCAL_DEVELOPMENT_SIGNING_PATH = ROOT / ".pulsephone-local/development-signing.json"
+MANIFESTS = ROOT / "Packaging/manifests"
+MAPPING_PATH = MANIFESTS / "AppBundleContentManifest.mapping.v1.json"
+CONFIGURATION_PATH = MANIFESTS / "ReleaseCandidateInput.configuration.v1.json"
+BUILD_NUMBER_STATE_PATH = BUILD / "package-app-build-number.v1.json"
+BUILD_NUMBER_LOCK_PATH = BUILD / "package-app-build-number.lock"
+CONTRACT_IDENTITY_PATH = ROOT / "Fixtures/developer-support/routing/current-contract-identity.v1.json"
+COMMAND_CATALOG_PATH = ROOT / "Registries/command-catalog.v1.json"
+PREPARATION_GROUPS_PATH = ROOT / "Registries/preparation-groups.v1.json"
+APP_CONTENT_DOMAIN = b"pulsephone.app-bundle-content.v1\0"
+CANDIDATE_INPUT_DOMAIN = b"pulsephone.release-candidate-input.v1\0"
+PATH_KEY_DOMAIN = b"pulsephone.artifact-path-key.v1\0"
+CATALOG_EXPOSURE_DOMAIN = b"pulsephone.catalog-public-exposure.v1\0"
+SWIFTPM_DISABLE_SANDBOX_ENV = "PULSEPHONE_SWIFTPM_DISABLE_SANDBOX"
+MAX_ENTRIES = 65_536
+MAX_MANIFEST_BYTES = 32 * 1024 * 1024
+MAX_OTHER_DOCUMENT_BYTES = 64 * 1024 * 1024
+MAX_PATH_BYTES = 1_024
+SAFE_PATH = re.compile(r"^[A-Za-z0-9._/-]+/?$")
+SHA1_IDENTITY = re.compile(r"^[0-9A-Fa-f]{40}$")
+DECIMAL_BUILD_ID = re.compile(r"^[1-9][0-9]{0,17}$")
+SEMANTIC_APP_VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+MAX_BUILD_ID = 999_999_999_999_999_999
+RELEASE_HELPER_NAMES = (
+    "PulsePhoneDirectHelper",
+    "PulsePhoneCoreDeviceHelper",
+)
+SIGNED_EXECUTABLE_PATHS = (
+    "Contents/MacOS/PulsePhone",
+    "Contents/Helpers/PulsePhoneRuntime",
+    "Contents/Helpers/PulsePhoneDirectHelper",
+    "Contents/Helpers/PulsePhoneCoreDeviceHelper",
+)
+
+
+class PackagingError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    pid: int
+    parent_pid: int
+    process_group_id: int
+    user_id: int
+    started: str
+    command: str
+
+
+@dataclass(frozen=True)
+class BuildNumberState:
+    app_version: str
+    last_build_id: int
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise PackagingError(message)
+
+
+def require_at_most(value: int, maximum: int, message: str) -> None:
+    require(0 <= value <= maximum, message)
+
+
+def canonical_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def domain_hash(domain: bytes, value: Any) -> str:
+    return sha256(domain + canonical_bytes(value))
+
+
+def load_canonical(path: Path) -> dict[str, Any]:
+    data = path.read_bytes()
+    require(len(data) <= MAX_OTHER_DOCUMENT_BYTES, f"document byte cap: {path}")
+    value = json.loads(data)
+    require(isinstance(value, dict), f"expected object: {path}")
+    require(data == canonical_bytes(value), f"noncanonical JSON: {path.relative_to(ROOT)}")
+    return value
+
+
+def parse_build_id(value: Any, context: str) -> int:
+    require(
+        isinstance(value, str)
+        and DECIMAL_BUILD_ID.fullmatch(value) is not None,
+        f"invalid build ID: {context}",
+    )
+    parsed = int(value)
+    require(parsed <= MAX_BUILD_ID, f"build ID cap: {context}")
+    return parsed
+
+
+def parse_app_version(value: Any, context: str) -> tuple[int, int, int]:
+    require(
+        isinstance(value, str)
+        and (match := SEMANTIC_APP_VERSION.fullmatch(value)) is not None,
+        f"invalid app version: {context}",
+    )
+    return tuple(int(component) for component in match.groups())  # type: ignore[return-value]
+
+
+def configuration_with_build_id(
+    configuration: dict[str, Any],
+    build_id: int,
+) -> dict[str, Any]:
+    configured = parse_build_id(configuration.get("buildID"), "configuration")
+    info = configuration.get("infoPlist")
+    require(isinstance(info, dict), "Info.plist configuration")
+    require(
+        parse_build_id(info.get("CFBundleVersion"), "Info.plist") == configured,
+        "build ID configuration mismatch",
+    )
+    result = dict(configuration)
+    result["buildID"] = str(build_id)
+    result_info = dict(info)
+    result_info["CFBundleVersion"] = str(build_id)
+    result["infoPlist"] = result_info
+    return result
+
+
+def load_build_number_state(path: Path) -> BuildNumberState | None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    require(
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_nlink == 1
+        and metadata.st_uid == os.geteuid()
+        and stat.S_IMODE(metadata.st_mode) == 0o600,
+        "unsafe build number state",
+    )
+    data = path.read_bytes()
+    require(0 < len(data) <= 4 * 1024, "build number state size")
+    value = json.loads(data)
+    require(isinstance(value, dict) and data == canonical_bytes(value), "build number state")
+    require(
+        set(value) == {"appVersion", "lastBuildID", "schemaVersion"},
+        "build number state shape",
+    )
+    require(value.get("schemaVersion") == 1, "build number state schema")
+    app_version = value.get("appVersion")
+    parse_app_version(app_version, "build number state")
+    return BuildNumberState(
+        app_version=app_version,
+        last_build_id=parse_build_id(value.get("lastBuildID"), "build number state"),
+    )
+
+
+def write_build_number_state(path: Path, app_version: str, build_id: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary_value = tempfile.mkstemp(
+        prefix=".package-app-build-number.",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_value)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(canonical_bytes({
+                "appVersion": app_version,
+                "lastBuildID": str(build_id),
+                "schemaVersion": 1,
+            }))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def allocated_build_configuration(
+    configuration: dict[str, Any],
+    *,
+    reserve: bool,
+    state_path: Path = BUILD_NUMBER_STATE_PATH,
+    lock_path: Path = BUILD_NUMBER_LOCK_PATH,
+) -> dict[str, Any]:
+    configured = parse_build_id(configuration.get("buildID"), "configuration")
+    app_version = configuration.get("appVersion")
+    parsed_app_version = parse_app_version(app_version, "configuration")
+    state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(
+        lock_path,
+        os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        require(
+            stat.S_ISREG(metadata.st_mode)
+            and metadata.st_nlink == 1
+            and metadata.st_uid == os.geteuid()
+            and stat.S_IMODE(metadata.st_mode) == 0o600,
+            "unsafe build number lock",
+        )
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        last = load_build_number_state(state_path)
+        if last is None:
+            next_build = configured + 1
+        else:
+            parsed_last_version = parse_app_version(last.app_version, "build number state")
+            require(parsed_app_version >= parsed_last_version, "app version rollback")
+            if parsed_app_version > parsed_last_version:
+                next_build = 1
+            else:
+                next_build = last.last_build_id + 1
+        require(next_build <= MAX_BUILD_ID, "build ID exhausted")
+        if reserve:
+            write_build_number_state(state_path, app_version, next_build)
+        return configuration_with_build_id(configuration, next_build)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def normalized_relative_path(value: str, *, directory: bool = False) -> str:
+    require(isinstance(value, str), "relative path must be a string")
+    encoded_length = len(value.encode("utf-8"))
+    require(encoded_length > 0, "empty relative path")
+    require_at_most(encoded_length, MAX_PATH_BYTES, f"relative path byte cap: {value!r}")
+    require(SAFE_PATH.fullmatch(value) is not None, f"unsafe relative path: {value!r}")
+    require(not value.startswith("/"), f"absolute relative path: {value!r}")
+    require("\\" not in value, f"backslash in relative path: {value!r}")
+    require(directory == value.endswith("/"), f"directory suffix mismatch: {value!r}")
+    parts = value[:-1].split("/") if directory else value.split("/")
+    require(all(part not in ("", ".", "..") for part in parts), f"unsafe path component: {value!r}")
+    return value
+
+
+def copy_file(source: Path, destination: Path, *, executable: bool = False) -> None:
+    metadata = source.lstat()
+    require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1, f"unsafe source file: {source}")
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    shutil.copyfile(source, destination)
+    os.chmod(destination, 0o755 if executable else 0o644)
+
+
+def copy_tracked_tree(source: Path, destination: Path) -> None:
+    require(source.is_dir() and not source.is_symlink(), f"source tree missing: {source.relative_to(ROOT)}")
+    source_relative = source.relative_to(ROOT).as_posix()
+    output = subprocess.check_output(
+        ["/usr/bin/git", "ls-files", "-z", "--", source_relative],
+        cwd=ROOT,
+    )
+    tracked = [item.decode("utf-8") for item in output.split(b"\0") if item]
+    require(tracked, f"tracked source tree is empty: {source_relative}")
+    destination.mkdir(parents=True, mode=0o755)
+    for tracked_path in tracked:
+        path = ROOT / tracked_path
+        relative = path.relative_to(source)
+        normalized_relative_path(relative.as_posix())
+        copy_file(path, destination / relative)
+
+
+def copy_release_licenses(destination: Path) -> None:
+    for relative in ("NOTICE.txt", "go/Go-LICENSE.txt"):
+        source = ROOT / "Packaging/licenses" / relative
+        require(source.is_file() and not source.is_symlink(), f"release license missing: {relative}")
+        copy_file(source, destination / relative)
+
+
+def validate_release_helper_bundle(app: Path) -> None:
+    helpers = app / "Contents/Helpers"
+    for name in RELEASE_HELPER_NAMES:
+        path = helpers / name
+        metadata = path.lstat()
+        require(
+            stat.S_ISREG(metadata.st_mode)
+            and metadata.st_nlink == 1
+            and bool(metadata.st_mode & stat.S_IXUSR),
+            f"invalid release helper node: {name}",
+        )
+        require(
+            path.read_bytes()[:4] in (b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe"),
+            f"release helper is not arm64 Mach-O: {name}",
+        )
+    for path in app.rglob("*"):
+        relative = path.relative_to(app).as_posix()
+        require("python" not in relative.lower(), f"Python release bundle node: {relative}")
+        require(path.suffix.lower() not in (".py", ".pyc", ".pyo"), f"Python release bundle suffix: {relative}")
+
+
+def run(command: list[str]) -> None:
+    subprocess.run(command, cwd=ROOT, check=True, stdout=sys.stderr, stderr=sys.stderr)
+
+
+def cli_output(executable: Path, arguments: list[str]) -> str:
+    completed = subprocess.run(
+        [str(executable), *arguments],
+        cwd="/",
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    require(
+        completed.returncode == 0,
+        f"CLI {' '.join(arguments)} failed: {completed.stderr.strip()}",
+    )
+    require(completed.stderr == "", f"CLI {' '.join(arguments)} wrote stderr")
+    return completed.stdout
+
+
+def verify_cli_entrypoints(app: Path, configuration: dict[str, Any]) -> None:
+    executable = app / "Contents/MacOS/PulsePhone"
+    direct_help = cli_output(executable, ["--help"])
+    direct_version = cli_output(executable, ["version", "--json"])
+    with tempfile.TemporaryDirectory(prefix="pulsephone-cli-link-") as temporary:
+        launcher = Path(temporary) / "PulsePhone"
+        launcher.symlink_to(executable)
+        require(cli_output(launcher, ["--help"]) == direct_help, "symlink CLI help")
+        require(
+            cli_output(launcher, ["version", "--json"]) == direct_version,
+            "symlink CLI version",
+        )
+    version = json.loads(direct_version)
+    require(version.get("commandID") == "product.version", "CLI version command ID")
+    require(version.get("ok") is True, "CLI version outcome")
+    result = version.get("result")
+    require(isinstance(result, dict), "CLI version result")
+    require(result.get("version") == configuration.get("appVersion"), "CLI app version")
+    require(result.get("build") == configuration.get("buildID"), "CLI build ID")
+
+
+def normalized_development_signing_identity(value: str | None) -> str:
+    if value is None:
+        return "-"
+    require(
+        isinstance(value, str) and SHA1_IDENTITY.fullmatch(value) is not None,
+        "development signing identity must be a 40-character SHA-1 fingerprint",
+    )
+    return value.upper()
+
+
+def development_signing_identity(argument_value: str | None) -> str:
+    if argument_value is not None:
+        return normalized_development_signing_identity(argument_value)
+    environment_value = os.environ.get("PULSEPHONE_DEVELOPMENT_SIGNING_IDENTITY")
+    if environment_value is not None:
+        return normalized_development_signing_identity(environment_value)
+    if not LOCAL_DEVELOPMENT_SIGNING_PATH.exists():
+        return "-"
+    require(
+        LOCAL_DEVELOPMENT_SIGNING_PATH.is_file()
+        and not LOCAL_DEVELOPMENT_SIGNING_PATH.is_symlink(),
+        "unsafe local development signing configuration",
+    )
+    configuration = json.loads(LOCAL_DEVELOPMENT_SIGNING_PATH.read_bytes())
+    require(
+        isinstance(configuration, dict)
+        and configuration.get("schemaVersion") == 1
+        and set(configuration) == {"identitySHA1", "schemaVersion"},
+        "local development signing configuration",
+    )
+    return normalized_development_signing_identity(configuration.get("identitySHA1"))
+
+
+def bundle_codesign_arguments(signing_identity: str, identifier: str, path: Path) -> list[str]:
+    arguments = [
+        "/usr/bin/codesign", "--force", "--sign", signing_identity,
+        "--timestamp=none",
+    ]
+    if signing_identity != "-":
+        arguments.extend(["--options", "runtime"])
+    arguments.extend(["--identifier", identifier, str(path)])
+    return arguments
+
+
+def swiftpm_disable_sandbox(environment: dict[str, str]) -> bool:
+    value = environment.get(SWIFTPM_DISABLE_SANDBOX_ENV)
+    require(
+        value in (None, "1"),
+        f"{SWIFTPM_DISABLE_SANDBOX_ENV} must be unset or 1",
+    )
+    return value == "1"
+
+
+def swift_build_arguments(
+    scratch: Path,
+    product: str,
+    *,
+    disable_sandbox: bool = False,
+) -> list[str]:
+    arguments = [
+        "/usr/bin/xcrun", "swift", "build", "-c", "release",
+        "--scratch-path", str(scratch), "--product", product, "--jobs", "1",
+        "-Xswiftc", "-no-whole-module-optimization",
+        "-Xswiftc", "-num-threads", "-Xswiftc", "1",
+        "-debug-info-format", "none",
+    ]
+    if disable_sandbox:
+        arguments.insert(3, "--disable-sandbox")
+    return arguments
+
+
+def macho_uuid_offset(data: bytes) -> int:
+    require(len(data) >= 32, "truncated Mach-O header")
+    magic, _, _, _, command_count, command_bytes, _, _ = struct.unpack_from(
+        "<IiiIIIII", data, 0
+    )
+    require(magic == 0xFEEDFACF, "expected little-endian 64-bit Mach-O")
+    offset = 32
+    limit = offset + command_bytes
+    require(limit <= len(data), "truncated Mach-O load commands")
+    uuid_offsets = []
+    for _ in range(command_count):
+        require(offset + 8 <= limit, "truncated Mach-O load command")
+        command, command_size = struct.unpack_from("<II", data, offset)
+        require(command_size >= 8 and offset + command_size <= limit, "invalid Mach-O load command")
+        if command == 0x1B:
+            require(command_size == 24, "invalid LC_UUID size")
+            uuid_offsets.append(offset + 8)
+        offset += command_size
+    require(offset == limit and len(uuid_offsets) == 1, "expected exactly one LC_UUID")
+    return uuid_offsets[0]
+
+
+def content_derived_uuid(data: bytes) -> bytes:
+    value = bytearray(hashlib.sha256(data).digest()[:16])
+    value[6] = (value[6] & 0x0F) | 0x50
+    value[8] = (value[8] & 0x3F) | 0x80
+    return bytes(value)
+
+
+def normalize_macho(source: Path, destination: Path, identifier: str) -> None:
+    copy_file(source, destination, executable=True)
+    subprocess.run(
+        ["/usr/bin/codesign", "--remove-signature", str(destination)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    data = bytearray(destination.read_bytes())
+    uuid_offset = macho_uuid_offset(data)
+    data[uuid_offset : uuid_offset + 16] = bytes(16)
+    data[uuid_offset : uuid_offset + 16] = content_derived_uuid(data)
+    destination.write_bytes(data)
+    os.chmod(destination, 0o755)
+    subprocess.run(
+        [
+            "/usr/bin/codesign", "--force", "--sign", "-",
+            "--timestamp=none", "--identifier", identifier, str(destination),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def verify_deterministic_macho(path: Path) -> None:
+    load_commands = subprocess.check_output(
+        ["/usr/bin/otool", "-l", str(path)],
+        text=True,
+    )
+    require(
+        load_commands.count("cmd LC_UUID") == 1,
+        f"invalid Mach-O UUID count: {path.name}",
+    )
+    symbols = subprocess.check_output(
+        ["/usr/bin/nm", "-pa", str(path)],
+        text=True,
+    )
+    require(" OSO " not in symbols, f"path-bearing Mach-O symbols: {path.name}")
+    subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--strict", str(path)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def candidate_build_root() -> Path:
+    BUILD.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root = BUILD / "package-app-cold"
+    if root.exists():
+        require(root.is_dir() and not root.is_symlink(), "unsafe candidate build root")
+        shutil.rmtree(root)
+    root.mkdir(mode=0o700)
+    return root
+
+
+def swift_products(build_root: Path) -> dict[str, Path]:
+    scratch = build_root / "swift"
+    developer_dir = subprocess.check_output(["/usr/bin/xcode-select", "-p"], text=True).strip()
+    environment = dict(os.environ)
+    environment["DEVELOPER_DIR"] = developer_dir
+    disable_sandbox = swiftpm_disable_sandbox(environment)
+    for product in ("PulsePhone", "PulsePhoneRuntime"):
+        subprocess.run(
+            swift_build_arguments(
+                scratch,
+                product,
+                disable_sandbox=disable_sandbox,
+            ),
+            cwd=ROOT,
+            env=environment,
+            check=True,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+        )
+    bin_path = subprocess.check_output(
+        [
+            "/usr/bin/xcrun", "swift", "build",
+            *(["--disable-sandbox"] if disable_sandbox else []),
+            "-c", "release", "--scratch-path", str(scratch), "--show-bin-path",
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+    ).strip()
+    linked_products = {
+        "PulsePhone": Path(bin_path) / "PulsePhone",
+        "PulsePhoneRuntime": Path(bin_path) / "PulsePhoneRuntime",
+    }
+    require(all(path.is_file() and not path.is_symlink() for path in linked_products.values()), "Swift product missing")
+    normalized_root = build_root / "products"
+    normalized_root.mkdir(mode=0o700)
+    products = {}
+    for name, source in linked_products.items():
+        destination = normalized_root / name
+        normalize_macho(source, destination, name)
+        products[name] = destination
+    for path in products.values():
+        verify_deterministic_macho(path)
+    return products
+
+
+def go_products(build_root: Path) -> dict[str, Path]:
+    output_root = build_root / "go"
+    output_root.mkdir(mode=0o700)
+    environment = dict(os.environ)
+    environment.update({
+        "GOENV": "off",
+        "GOWORK": "off",
+        "GOTOOLCHAIN": "local",
+        "CGO_ENABLED": "0",
+        "GOOS": "darwin",
+        "GOARCH": "arm64",
+        "GOFLAGS": "-mod=vendor",
+        "GOCACHE": str(build_root / "go-cache"),
+    })
+    products: dict[str, Path] = {}
+    commands = {
+        "PulsePhoneDirectHelper": "./cmd/pulsephone-direct-helper",
+        "PulsePhoneCoreDeviceHelper": "./cmd/pulsephone-coredevice-helper",
+    }
+    go = shutil.which("go")
+    require(go is not None, "Go toolchain not found on PATH")
+    for name, package in commands.items():
+        raw = output_root / f"{name}.raw"
+        subprocess.run(
+            [go, "build", "-trimpath", "-buildvcs=true", "-ldflags=-s -w", "-o", str(raw), package],
+            cwd=ROOT / "GoHelpers",
+            env=environment,
+            check=True,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+        )
+        destination = output_root / name
+        normalize_macho(raw, destination, f"com.pulsephone.PulsePhone.{name}")
+        raw.unlink()
+        verify_deterministic_macho(destination)
+        products[name] = destination
+    return products
+
+
+def write_info_plist(destination: Path, configuration: dict[str, Any]) -> None:
+    info = configuration.get("infoPlist")
+    require(isinstance(info, dict), "Info.plist configuration")
+    require(info.get("CFBundleIdentifier") == configuration.get("bundleIdentifier"), "bundle identifier mismatch")
+    require(info.get("CFBundleShortVersionString") == configuration.get("appVersion"), "app version mismatch")
+    require(info.get("CFBundleVersion") == configuration.get("buildID"), "build ID mismatch")
+    require(info.get("NSCameraUseContinuityCameraDeviceType") is True, "Continuity Camera device type opt-in")
+    destination.write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_XML, sort_keys=True))
+    os.chmod(destination, 0o644)
+
+
+def assemble_app(root: Path, products: dict[str, Path], configuration: dict[str, Any]) -> Path:
+    app = root / "PulsePhone.app"
+    (app / "Contents/MacOS").mkdir(parents=True, mode=0o755)
+    (app / "Contents/Helpers").mkdir(mode=0o755)
+    (app / "Contents/Resources").mkdir(mode=0o755)
+    copy_file(products["PulsePhone"], app / "Contents/MacOS/PulsePhone", executable=True)
+    copy_file(products["PulsePhoneRuntime"], app / "Contents/Helpers/PulsePhoneRuntime", executable=True)
+    copy_file(
+        products["PulsePhoneDirectHelper"],
+        app / "Contents/Helpers/PulsePhoneDirectHelper",
+        executable=True,
+    )
+    copy_file(
+        products["PulsePhoneCoreDeviceHelper"],
+        app / "Contents/Helpers/PulsePhoneCoreDeviceHelper",
+        executable=True,
+    )
+    registries = app / "Contents/Resources/Registries"
+    registries.mkdir(mode=0o755)
+    registry_output = subprocess.check_output(
+        ["/usr/bin/git", "ls-files", "-z", "--", "Registries/*.json"],
+        cwd=ROOT,
+    )
+    registry_files = sorted(
+        (ROOT / item.decode("utf-8") for item in registry_output.split(b"\0") if item),
+        key=lambda item: item.name.encode("utf-8"),
+    )
+    require(registry_files, "no registries")
+    for source in registry_files:
+        copy_file(source, registries / source.name)
+    copy_tracked_tree(ROOT / "Schemas", app / "Contents/Resources/Schemas")
+    copy_release_licenses(app / "Contents/Resources/Licenses")
+    agent_skills = app / "Contents/Resources/AgentSkills"
+    copy_file(
+        ROOT / "skills/pulsephone/SKILL.md",
+        agent_skills / "portable/pulsephone/SKILL.md",
+    )
+    copy_file(
+        ROOT / "skills/pulsephone/agents/openai.yaml",
+        agent_skills / "codex/pulsephone/agents/openai.yaml",
+    )
+    validate_agent_skill_resources(app)
+    write_info_plist(app / "Contents/Info.plist", configuration)
+    validate_release_helper_bundle(app)
+    return app
+
+
+def validate_bundle_mapping(mapping: dict[str, Any]) -> None:
+    expected = {
+        ("Contents/Helpers/PulsePhoneCoreDeviceHelper", "goProduct", "build/go/release/PulsePhoneCoreDeviceHelper"),
+        ("Contents/Helpers/PulsePhoneDirectHelper", "goProduct", "build/go/release/PulsePhoneDirectHelper"),
+        ("Contents/Helpers/PulsePhoneRuntime", "swiftProduct", "PulsePhoneRuntime"),
+        ("Contents/MacOS/PulsePhone", "swiftProduct", "PulsePhone"),
+    }
+    rows = mapping.get("mappings")
+    require(isinstance(rows, list), "bundle mapping rows")
+    actual = {
+        (row.get("destination"), row.get("kind"), row.get("source"))
+        for row in rows
+        if isinstance(row, dict)
+    }
+    require(expected.issubset(actual), "bundle mapping missing executable")
+    require(not any("python" in str(row).lower() for row in rows), "bundle mapping exposes Python")
+
+
+def validate_agent_skill_resources(app: Path) -> None:
+    portable = app / "Contents/Resources/AgentSkills/portable/pulsephone/SKILL.md"
+    codex = app / "Contents/Resources/AgentSkills/codex/pulsephone/agents/openai.yaml"
+    for path, maximum in ((portable, 128 * 1024), (codex, 16 * 1024)):
+        metadata = path.lstat()
+        require(
+            stat.S_ISREG(metadata.st_mode)
+            and metadata.st_nlink == 1
+            and 0 < metadata.st_size <= maximum,
+            "Agent Skill resource node",
+        )
+    portable_text = portable.read_text(encoding="utf-8")
+    require(portable_text.startswith("---\nname: pulsephone\n"), "Agent Skill name")
+    require("PulsePhone version --json" in portable_text, "Agent Skill global preflight")
+    require("bin/PulsePhone.app" not in portable_text, "Agent Skill bundled app reference")
+    require("self install" not in portable_text, "Agent Skill self-install reference")
+    codex_text = codex.read_text(encoding="utf-8")
+    require("$pulsephone" in codex_text, "Codex Agent Skill default prompt")
+    require("$phlusephone" not in codex_text, "legacy Agent Skill name")
+
+
+def seal_app_bundle(
+    app: Path,
+    configuration: dict[str, Any],
+    signing_identity: str,
+) -> None:
+    bundle_identifier = configuration.get("bundleIdentifier")
+    require(isinstance(bundle_identifier, str) and bundle_identifier, "bundle signing identifier")
+    runtime = app / "Contents/Helpers/PulsePhoneRuntime"
+    if signing_identity != "-":
+        run(bundle_codesign_arguments(
+            signing_identity, f"{bundle_identifier}.runtime", runtime
+        ))
+    for name in ("PulsePhoneDirectHelper", "PulsePhoneCoreDeviceHelper"):
+        helper = app / "Contents/Helpers" / name
+        run(bundle_codesign_arguments(
+            signing_identity, f"{bundle_identifier}.{name}", helper
+        ))
+    run(bundle_codesign_arguments(signing_identity, bundle_identifier, app))
+    code_resources = app / "Contents/_CodeSignature/CodeResources"
+    require(
+        code_resources.is_file()
+        and not code_resources.is_symlink()
+        and code_resources.stat().st_size > 0,
+        "outer app CodeResources seal",
+    )
+    run(["/usr/bin/codesign", "--verify", "--strict", str(runtime)])
+    for name in ("PulsePhoneDirectHelper", "PulsePhoneCoreDeviceHelper"):
+        run(["/usr/bin/codesign", "--verify", "--strict", str(app / "Contents/Helpers" / name)])
+    run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)])
+
+
+def component_code_directory_hashes(app: Path) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for relative_path in SIGNED_EXECUTABLE_PATHS:
+        path = app / relative_path
+        output = subprocess.check_output(
+            ["/usr/bin/codesign", "-d", "--verbose=4", str(path)],
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+        matches = re.findall(r"^CDHash=([0-9A-Fa-f]{40})$", output, re.MULTILINE)
+        require(len(matches) == 1, f"missing code directory hash: {relative_path}")
+        hashes[relative_path] = matches[0].lower()
+    return hashes
+
+
+def safe_link_target(relative_path: str, target: str) -> None:
+    normalized_relative_path(target)
+    parent = Path(relative_path).parent
+    combined = parent / target
+    require(not combined.is_absolute(), f"absolute symlink target: {relative_path}")
+    stack: list[str] = []
+    for part in combined.parts:
+        if part == "..":
+            require(stack, f"outside symlink target: {relative_path}")
+            stack.pop()
+        elif part not in ("", "."):
+            stack.append(part)
+
+
+def content_manifest(app: Path) -> dict[str, Any]:
+    require(app.name == "PulsePhone.app" and app.is_dir() and not app.is_symlink(), "app root")
+    entries: list[dict[str, Any]] = []
+    for path in app.rglob("*"):
+        require_at_most(len(entries) + 1, MAX_ENTRIES, "app bundle entry cap")
+        metadata = path.lstat()
+        relative = path.relative_to(app).as_posix()
+        mode = stat.S_IMODE(metadata.st_mode)
+        if stat.S_ISDIR(metadata.st_mode):
+            relative = normalized_relative_path(relative + "/", directory=True)
+            entry = {"mode": mode, "nodeType": "directory", "relativePath": relative}
+        elif stat.S_ISREG(metadata.st_mode):
+            require(metadata.st_nlink == 1, f"hardlinked bundle file: {relative}")
+            relative = normalized_relative_path(relative)
+            data = path.read_bytes()
+            entry = {
+                "byteLength": len(data),
+                "mode": mode,
+                "nodeType": "file",
+                "relativePath": relative,
+                "sha256": sha256(data),
+            }
+        elif stat.S_ISLNK(metadata.st_mode):
+            relative = normalized_relative_path(relative)
+            target = os.readlink(path)
+            safe_link_target(relative, target)
+            entry = {"linkTarget": target, "mode": mode, "nodeType": "symlink", "relativePath": relative}
+        else:
+            raise PackagingError(f"unsupported bundle node: {relative}")
+        entries.append(entry)
+    entries.sort(key=lambda item: item["relativePath"].encode("utf-8"))
+    require_at_most(len(entries), MAX_ENTRIES, "app bundle entry cap")
+    manifest = {"entries": entries, "schemaVersion": 1}
+    require_at_most(len(canonical_bytes(manifest)), MAX_MANIFEST_BYTES, "app manifest byte cap")
+    validate_manifest_against_tree(app, manifest)
+    return manifest
+
+
+def validate_manifest_against_tree(app: Path, manifest: dict[str, Any]) -> None:
+    require(manifest.get("schemaVersion") == 1, "manifest schema version")
+    entries = manifest.get("entries")
+    require(isinstance(entries, list), "manifest entries")
+    require_at_most(len(entries), MAX_ENTRIES, "manifest entries")
+    require(entries == sorted(entries, key=lambda item: item["relativePath"].encode("utf-8")), "manifest ordering")
+    require(len({item["relativePath"] for item in entries}) == len(entries), "duplicate manifest path")
+    actual_paths = set()
+    for path in app.rglob("*"):
+        relative = path.relative_to(app).as_posix() + ("/" if path.is_dir() and not path.is_symlink() else "")
+        actual_paths.add(relative)
+    require(actual_paths == {item["relativePath"] for item in entries}, "manifest tree mismatch")
+
+
+def compatibility_rules(catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows = catalog.get("compatibilityRules")
+    require(isinstance(rows, list), "compatibility rules")
+    result = {row["ruleID"]: row for row in rows}
+    require(len(result) == len(rows), "duplicate compatibility rule")
+    return result
+
+
+def os_claim(minimum_major: int, maximum_exclusive: str) -> dict[str, Any]:
+    minimum = f"{minimum_major}.0.0"
+    require(tuple(map(int, minimum.split("."))) < tuple(map(int, maximum_exclusive.split("."))), "invalid OS range")
+    return {
+        "boundedVersionRange": {"maximumExclusive": maximum_exclusive, "minimumInclusive": minimum},
+        "claimKind": "boundedVersionRange",
+    }
+
+
+def catalog_exposure(configuration: dict[str, Any]) -> list[dict[str, Any]]:
+    catalog = load_canonical(COMMAND_CATALOG_PATH)
+    groups = load_canonical(PREPARATION_GROUPS_PATH)
+    rules = compatibility_rules(catalog)
+    maximum = configuration["deviceOSMaximumExclusive"]
+    default_minimum = configuration["deviceOSMinimumInclusive"]
+    default_minimum_parts = tuple(map(int, default_minimum.split(".")))
+    require(len(default_minimum_parts) == 3 and default_minimum_parts[1:] == (0, 0), "default device OS minimum")
+    device_class = configuration["deviceClass"]
+    scopes: list[dict[str, Any]] = []
+    for row in catalog["productActions"]:
+        rule = rules[row["policyBindings"]["compatibilityRuleID"]]["parameters"]
+        if rule["deviceRequired"]:
+            scopes.append({
+                "deviceClass": device_class,
+                "osClaim": os_claim(rule.get("minimumOSMajor", default_minimum_parts[0]), maximum),
+                "productActionID": row["commandID"],
+                "scopeKind": "device",
+            })
+        else:
+            scopes.append({"productActionID": row["commandID"], "scopeKind": "host"})
+    feature_minimums = {
+        "developerSupport.transparentPreparation": 14,
+        "live.audioPreview": 14,
+        "live.identityPlaceholderBlindControl": 14,
+        "live.inputObservationOverlay": 17,
+        "live.targetBindingSafety": 14,
+        "live.videoPreview": 14,
+    }
+    require(set(feature_minimums) == {row["featureID"] for row in catalog["features"]}, "feature ceiling mapping")
+    for feature_id, minimum in feature_minimums.items():
+        scopes.append({
+            "deviceClass": device_class,
+            "nonCommandFeatureID": feature_id,
+            "osClaim": os_claim(minimum, maximum),
+            "scopeKind": "device",
+        })
+    for group in groups["preparationGroups"]:
+        rule = rules[group["compatibilityRuleID"]]["parameters"]
+        maximum_for_group = f"{rule['maximumOSMajorExclusive']}.0.0" if "maximumOSMajorExclusive" in rule else maximum
+        scopes.append({
+            "deviceClass": device_class,
+            "osClaim": os_claim(rule["minimumOSMajor"], maximum_for_group),
+            "preparationGroupID": group["preparationGroupID"],
+            "route": group["route"],
+            "scopeKind": "device",
+        })
+    scopes.sort(key=canonical_bytes)
+    require(len({canonical_bytes(item) for item in scopes}) == len(scopes), "duplicate catalog exposure")
+    return scopes
+
+
+def repository_state() -> tuple[str, str]:
+    commit = subprocess.check_output(["/usr/bin/git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    require(re.fullmatch(r"[0-9a-f]{40}", commit) is not None, "source commit")
+    status = subprocess.check_output(["/usr/bin/git", "status", "--porcelain", "--untracked-files=all"], cwd=ROOT, text=True)
+    require(status == "", "package-app requires a clean worktree")
+    return commit, "clean"
+
+
+def parse_process_snapshot(value: str) -> list[ProcessIdentity]:
+    processes: list[ProcessIdentity] = []
+    for line in value.splitlines():
+        fields = line.strip().split(None, 9)
+        require(len(fields) == 10, "invalid process snapshot row")
+        try:
+            pid, parent_pid, process_group_id, user_id = map(int, fields[:4])
+        except ValueError as error:
+            raise PackagingError("invalid process snapshot identity") from error
+        require(
+            pid > 0 and parent_pid >= 0 and process_group_id > 0 and user_id >= 0,
+            "invalid process snapshot identity",
+        )
+        processes.append(ProcessIdentity(
+            pid=pid,
+            parent_pid=parent_pid,
+            process_group_id=process_group_id,
+            user_id=user_id,
+            started=" ".join(fields[4:9]),
+            command=fields[9],
+        ))
+    return processes
+
+
+def process_snapshot() -> list[ProcessIdentity]:
+    output = subprocess.check_output([
+        "/bin/ps", "-ww", "-axo",
+        "pid=,ppid=,pgid=,uid=,lstart=,command=",
+    ], text=True)
+    return parse_process_snapshot(output)
+
+
+def staging_gui_host_processes(
+    processes: Iterable[ProcessIdentity] | None = None,
+) -> list[ProcessIdentity]:
+    expected = str(
+        STAGING / "PulsePhone.app/Contents/MacOS/PulsePhone"
+    ) + " --gui-host"
+    snapshot = process_snapshot() if processes is None else list(processes)
+    return [
+        process for process in snapshot
+        if process.user_id == os.geteuid() and process.command == expected
+    ]
+
+
+def staging_owned_processes(
+    processes: Iterable[ProcessIdentity] | None = None,
+) -> list[ProcessIdentity]:
+    prefix = str(STAGING / "PulsePhone.app") + "/"
+    snapshot = process_snapshot() if processes is None else list(processes)
+    return [
+        process for process in snapshot
+        if process.user_id == os.geteuid() and process.command.startswith(prefix)
+    ]
+
+
+def require_staging_inactive() -> None:
+    active = staging_owned_processes()
+    require(
+        not active,
+        "active staging process prevents publication "
+        f"(pids={','.join(str(item.pid) for item in active)}); "
+        "use Scripts/dev-rebuild-live",
+    )
+
+
+def verified_objects_root(value: str) -> Path:
+    requested = Path(value)
+    require(not requested.is_absolute(), "objects root must be repository-relative")
+    require(requested.parts[:2] == ("build", "evidence"), "objects root must be under build/evidence")
+    path = ROOT / requested
+    current = ROOT
+    for component in requested.parts:
+        current = current / component
+        if current.exists():
+            require(not current.is_symlink() and current.is_dir(), f"unsafe objects root component: {component}")
+        else:
+            current.mkdir(mode=0o700)
+    return path
+
+
+def write_candidate(objects_root: Path, candidate: dict[str, Any]) -> Path:
+    data = canonical_bytes(candidate)
+    require(len(data) <= MAX_OTHER_DOCUMENT_BYTES, "candidate input byte cap")
+    candidate_hash = sha256(CANDIDATE_INPUT_DOMAIN + data)
+    path_key_input = {"artifactDomain": "developmentCandidateInput", "opaqueID": candidate_hash, "schemaVersion": 1}
+    path_key = sha256(PATH_KEY_DOMAIN + canonical_bytes(path_key_input))
+    destination_root = objects_root / path_key
+    destination = destination_root / "release-candidate-input.v1.json"
+    if destination_root.exists():
+        require(destination_root.is_dir() and not destination_root.is_symlink(), "candidate path collision")
+        require(destination.is_file() and destination.read_bytes() == data, "candidate bytes collision")
+        return destination
+    temporary = Path(tempfile.mkdtemp(prefix=".development-candidate.", dir=objects_root))
+    try:
+        candidate_path = temporary / destination.name
+        candidate_path.write_bytes(data)
+        os.chmod(candidate_path, 0o600)
+        os.replace(temporary, destination_root)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+    return destination
+
+
+def publish_staging(source_app: Path) -> Path:
+    require_staging_inactive()
+    STAGING.mkdir(parents=True, exist_ok=True, mode=0o700)
+    destination = STAGING / "PulsePhone.app"
+    backup = STAGING / ".PulsePhone.app.previous"
+    if backup.exists():
+        shutil.rmtree(backup)
+    if destination.exists():
+        os.replace(destination, backup)
+    os.replace(source_app, destination)
+    if backup.exists():
+        shutil.rmtree(backup)
+    return destination
+
+
+def package_app(
+    objects_root_value: str,
+    development_signing_identity_value: str | None,
+    before_publish: Callable[[str], None] | None = None,
+    allow_active_staging: bool = False,
+    publish_staging_app: bool = True,
+    include_component_code_directory_hashes: bool = False,
+    configuration_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    source_commit, worktree_state = repository_state()
+    if not allow_active_staging:
+        require_staging_inactive()
+    signing_identity = development_signing_identity(
+        development_signing_identity_value
+    )
+    mapping = load_canonical(MAPPING_PATH)
+    source_configuration = load_canonical(CONFIGURATION_PATH)
+    configuration = (
+        configuration_override
+        if configuration_override is not None
+        else allocated_build_configuration(source_configuration, reserve=True)
+    )
+    require(mapping.get("schemaVersion") == 1 and mapping.get("bundleRoot") == "PulsePhone.app", "bundle mapping")
+    validate_bundle_mapping(mapping)
+    require(configuration.get("schemaVersion") == 1, "candidate configuration")
+    build_root = candidate_build_root()
+    products = swift_products(build_root)
+    products.update(go_products(build_root))
+    temporary = Path(tempfile.mkdtemp(prefix="pulsephone-app-", dir=BUILD))
+    try:
+        app = assemble_app(temporary, products, configuration)
+        validate_release_helper_bundle(app)
+        seal_app_bundle(app, configuration, signing_identity)
+        component_hashes = component_code_directory_hashes(app)
+        verify_cli_entrypoints(app, configuration)
+        manifest = content_manifest(app)
+        manifest_bytes = canonical_bytes(manifest)
+        app_hash = sha256(APP_CONTENT_DOMAIN + manifest_bytes)
+        scopes = catalog_exposure(configuration)
+        exposure_hash = sha256(CATALOG_EXPOSURE_DOMAIN + canonical_bytes(scopes))
+        identity = load_canonical(CONTRACT_IDENTITY_PATH)
+        candidate = {
+            "appBundleContentManifest": manifest,
+            "candidate": {
+                "appBundleContentHash": app_hash,
+                "appVersion": configuration["appVersion"],
+                "buildID": configuration["buildID"],
+            },
+            "candidateKind": "developmentAssembly",
+            "catalogExposedScopes": scopes,
+            "catalogExposureHash": exposure_hash,
+            "implementationContractIdentity": identity,
+            "schemaVersion": 1,
+            "sourceCommit": source_commit,
+            "worktreeState": worktree_state,
+        }
+        objects_root = verified_objects_root(objects_root_value)
+        candidate_path = write_candidate(objects_root, candidate)
+        if before_publish is not None:
+            require(publish_staging_app, "publication callback requires staging publication")
+            before_publish(app_hash)
+        if publish_staging_app:
+            publish_staging(app)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        if build_root.exists():
+            shutil.rmtree(build_root)
+    result: dict[str, Any] = {
+        "artifactDomain": "developmentCandidateInput",
+        "path": candidate_path.relative_to(ROOT).as_posix(),
+        "releaseCandidateInputHash": sha256(CANDIDATE_INPUT_DOMAIN + canonical_bytes(candidate)),
+        "schemaVersion": 1,
+    }
+    if include_component_code_directory_hashes:
+        result["componentCodeDirectoryHashes"] = component_hashes
+    return result
+
+
+def verify_cold_reproducibility(
+    objects_root_value: str,
+    development_signing_identity_value: str | None,
+) -> dict[str, Any]:
+    configuration = allocated_build_configuration(
+        load_canonical(CONFIGURATION_PATH),
+        reserve=False,
+    )
+    first = package_app(
+        objects_root_value,
+        development_signing_identity_value,
+        publish_staging_app=False,
+        include_component_code_directory_hashes=True,
+        configuration_override=configuration,
+    )
+    second = package_app(
+        objects_root_value,
+        development_signing_identity_value,
+        publish_staging_app=False,
+        include_component_code_directory_hashes=True,
+        configuration_override=configuration,
+    )
+    first_hashes = first["componentCodeDirectoryHashes"]
+    second_hashes = second["componentCodeDirectoryHashes"]
+    require(
+        first_hashes == second_hashes,
+        "cold package code directory hashes differ: "
+        f"first={canonical_bytes(first_hashes).decode('ascii')} "
+        f"second={canonical_bytes(second_hashes).decode('ascii')}",
+    )
+    return {
+        "componentCodeDirectoryHashes": first_hashes,
+        "firstCandidate": {
+            "path": first["path"],
+            "releaseCandidateInputHash": first["releaseCandidateInputHash"],
+        },
+        "outcome": "passed",
+        "schemaVersion": 1,
+        "secondCandidate": {
+            "path": second["path"],
+            "releaseCandidateInputHash": second["releaseCandidateInputHash"],
+        },
+    }
+
+
+def inspect_tree(value: str) -> dict[str, Any]:
+    path = Path(value)
+    if not path.is_absolute():
+        path = ROOT / path
+    return content_manifest(path)
+
+
+def self_test() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="pulsephone-package-self-test-") as temporary_value:
+        temporary = Path(temporary_value)
+        build_configuration = {
+            "appVersion": "0.1.0",
+            "buildID": "3",
+            "infoPlist": {"CFBundleVersion": "3"},
+        }
+        build_state = temporary / "build-number.v1.json"
+        build_lock = temporary / "build-number.lock"
+        first_build = allocated_build_configuration(
+            build_configuration,
+            reserve=True,
+            state_path=build_state,
+            lock_path=build_lock,
+        )
+        second_build = allocated_build_configuration(
+            build_configuration,
+            reserve=True,
+            state_path=build_state,
+            lock_path=build_lock,
+        )
+        version_bumped_configuration = dict(build_configuration)
+        version_bumped_configuration["appVersion"] = "0.1.1"
+        reset_build = allocated_build_configuration(
+            version_bumped_configuration,
+            reserve=True,
+            state_path=build_state,
+            lock_path=build_lock,
+        )
+        resumed_build = allocated_build_configuration(
+            version_bumped_configuration,
+            reserve=True,
+            state_path=build_state,
+            lock_path=build_lock,
+        )
+        preview_build = allocated_build_configuration(
+            version_bumped_configuration,
+            reserve=False,
+            state_path=build_state,
+            lock_path=build_lock,
+        )
+        require(
+            first_build["buildID"] == "4"
+            and first_build["infoPlist"]["CFBundleVersion"] == "4"
+            and second_build["buildID"] == "5"
+            and reset_build["buildID"] == "1"
+            and resumed_build["buildID"] == "2"
+            and preview_build["buildID"] == "3"
+            and load_build_number_state(build_state)
+            == BuildNumberState(app_version="0.1.1", last_build_id=2),
+            "monotonic build allocation",
+        )
+        app = temporary / "PulsePhone.app"
+        (app / "Contents/MacOS").mkdir(parents=True)
+        executable = app / "Contents/MacOS/PulsePhone"
+        executable.write_bytes(b"pulsephone")
+        os.chmod(executable, 0o755)
+        os.symlink("PulsePhone", app / "Contents/MacOS/PulsePhoneLink")
+        manifest = content_manifest(app)
+        require(len(manifest["entries"]) == 4, "self-test manifest")
+        outside = temporary / "outside"
+        outside.write_bytes(b"outside")
+        bad = app / "Contents/MacOS/BadLink"
+        os.symlink("../../../outside", bad)
+        try:
+            content_manifest(app)
+        except PackagingError:
+            pass
+        else:
+            raise PackagingError("outside symlink accepted")
+        bad.unlink()
+        hardlink = app / "Contents/MacOS/Hardlink"
+        os.link(executable, hardlink)
+        try:
+            content_manifest(app)
+        except PackagingError:
+            pass
+        else:
+            raise PackagingError("hardlink accepted")
+        hardlink.unlink()
+        fifo = app / "Contents/MacOS/FIFO"
+        os.mkfifo(fifo)
+        try:
+            content_manifest(app)
+        except PackagingError:
+            pass
+        else:
+            raise PackagingError("FIFO accepted")
+        fifo.unlink()
+        invalid_manifest = {"entries": manifest["entries"][:-1], "schemaVersion": 1}
+        try:
+            validate_manifest_against_tree(app, invalid_manifest)
+        except PackagingError:
+            pass
+        else:
+            raise PackagingError("manifest/tree mismatch accepted")
+        for value in (MAX_ENTRIES - 1, MAX_ENTRIES):
+            require_at_most(value, MAX_ENTRIES, "entry cap")
+        try:
+            require_at_most(MAX_ENTRIES + 1, MAX_ENTRIES, "entry cap")
+        except PackagingError:
+            pass
+        else:
+            raise PackagingError("entry cap+1 accepted")
+        for value in (MAX_MANIFEST_BYTES - 1, MAX_MANIFEST_BYTES):
+            require_at_most(value, MAX_MANIFEST_BYTES, "manifest byte cap")
+        try:
+            require_at_most(MAX_MANIFEST_BYTES + 1, MAX_MANIFEST_BYTES, "manifest byte cap")
+        except PackagingError:
+            pass
+        else:
+            raise PackagingError("manifest byte cap+1 accepted")
+        normalized_relative_path("a" * (MAX_PATH_BYTES - 1))
+        normalized_relative_path("a" * MAX_PATH_BYTES)
+        try:
+            normalized_relative_path("a" * (MAX_PATH_BYTES + 1))
+        except PackagingError:
+            pass
+        else:
+            raise PackagingError("path byte cap+1 accepted")
+        try:
+            normalized_relative_path("../escape")
+        except PackagingError:
+            pass
+        else:
+            raise PackagingError("unsafe relative path accepted")
+        require(
+            (ROOT / "GoHelpers/go.mod").is_file()
+            and (ROOT / "GoHelpers/internal/protocol/generated/registry.go").is_file(),
+            "Go helper source and generated registry",
+        )
+        swift_arguments = swift_build_arguments(Path("/tmp/pulsephone-swift"), "PulsePhone")
+        require(
+            swift_arguments[-2:] == ["-debug-info-format", "none"]
+            and swift_arguments[swift_arguments.index("--jobs") + 1] == "1"
+            and "-no-whole-module-optimization" in swift_arguments
+            and swift_arguments[swift_arguments.index("-num-threads") + 2] == "1",
+            "deterministic Mach-O debug flags",
+        )
+        sandboxed_swift_arguments = swift_build_arguments(
+            Path("/tmp/pulsephone-swift"),
+            "PulsePhone",
+            disable_sandbox=swiftpm_disable_sandbox({
+                SWIFTPM_DISABLE_SANDBOX_ENV: "1",
+            }),
+        )
+        require(
+            sandboxed_swift_arguments[3] == "--disable-sandbox",
+            "explicit SwiftPM sandbox opt-out",
+        )
+        try:
+            swiftpm_disable_sandbox({SWIFTPM_DISABLE_SANDBOX_ENV: "true"})
+        except PackagingError:
+            pass
+        else:
+            raise PackagingError("unsafe SwiftPM sandbox opt-out accepted")
+        build_root = candidate_build_root()
+        try:
+            require(
+                build_root == BUILD / "package-app-cold"
+                and not any(build_root.iterdir()),
+                "candidate-scoped build root",
+            )
+        finally:
+            shutil.rmtree(build_root)
+        derived_uuid = content_derived_uuid(b"pulsephone")
+        require(
+            derived_uuid == content_derived_uuid(b"pulsephone")
+            and derived_uuid[6] >> 4 == 5
+            and derived_uuid[8] >> 6 == 2,
+            "content-derived Mach-O UUID",
+        )
+        require(
+            normalized_development_signing_identity(None) == "-"
+            and normalized_development_signing_identity("a" * 40) == "A" * 40,
+            "development signing identity normalization",
+        )
+        try:
+            normalized_development_signing_identity("Apple Development")
+        except PackagingError:
+            pass
+        else:
+            raise PackagingError("unsafe development signing identity accepted")
+        unsigned_signing = bundle_codesign_arguments("-", "com.pulsephone.test", Path("/tmp/test"))
+        signed_signing = bundle_codesign_arguments("A" * 40, "com.pulsephone.test", Path("/tmp/test"))
+        require(
+            "--options" not in unsigned_signing
+            and signed_signing[signed_signing.index("--options") + 1] == "runtime",
+            "hardened runtime signing options",
+        )
+        fake_processes = parse_process_snapshot(
+            "101 1 101 501 Mon Jul 27 10:23:52 2026 "
+            + str(STAGING / "PulsePhone.app/Contents/MacOS/PulsePhone")
+            + " --gui-host\n"
+            "102 101 101 501 Mon Jul 27 10:23:53 2026 "
+            + str(STAGING / "PulsePhone.app/Contents/Helpers/PulsePhoneRuntime")
+            + " --canonical-udid TEST-UDID\n"
+        )
+        require(len(fake_processes) == 2, "process snapshot rows")
+        require(
+            [item.pid for item in staging_gui_host_processes(fake_processes)] == [101],
+            "staging GUIHost process filter",
+        )
+        require(
+            [item.pid for item in staging_owned_processes(fake_processes)] == [101, 102],
+            "staging owned process filter",
+        )
+        skill_root = temporary / "PulsePhone.app"
+        portable = skill_root / "Contents/Resources/AgentSkills/portable/pulsephone"
+        codex = skill_root / "Contents/Resources/AgentSkills/codex/pulsephone/agents"
+        portable.mkdir(parents=True)
+        codex.mkdir(parents=True)
+        (portable / "SKILL.md").write_text(
+            "---\nname: pulsephone\ndescription: test\n---\nPulsePhone version --json\n",
+            encoding="utf-8",
+        )
+        (codex / "openai.yaml").write_text(
+            'interface:\n  default_prompt: "Use $pulsephone."\n',
+            encoding="utf-8",
+        )
+        validate_agent_skill_resources(skill_root)
+        (portable / "SKILL.md").write_text("---\nname: phlusephone\n", encoding="utf-8")
+        try:
+            validate_agent_skill_resources(skill_root)
+        except PackagingError:
+            pass
+        else:
+            raise PackagingError("legacy Agent Skill name accepted")
+    return {"outcome": "passed", "schemaVersion": 1, "tests": 32}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="package-app")
+    parser.add_argument("--objects-root")
+    parser.add_argument("--inspect-tree")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--verify-cold-reproducibility", action="store_true")
+    parser.add_argument("--development-signing-identity")
+    arguments = parser.parse_args()
+    selected = sum((arguments.inspect_tree is not None, arguments.self_test, arguments.verify_cold_reproducibility))
+    require(selected <= 1, "select exactly one package-app mode")
+    if arguments.verify_cold_reproducibility:
+        require(arguments.objects_root is not None, "cold reproducibility verification requires --objects-root")
+    else:
+        require(
+            (selected == 0) == (arguments.objects_root is not None),
+            "--objects-root selects package mode",
+        )
+    require(
+        arguments.development_signing_identity is None
+        or arguments.objects_root is not None,
+        "development signing identity requires --objects-root",
+    )
+    if arguments.self_test:
+        result = self_test()
+    elif arguments.inspect_tree is not None:
+        result = inspect_tree(arguments.inspect_tree)
+    elif arguments.verify_cold_reproducibility:
+        result = verify_cold_reproducibility(
+            arguments.objects_root,
+            arguments.development_signing_identity,
+        )
+    else:
+        result = package_app(
+            arguments.objects_root,
+            arguments.development_signing_identity,
+        )
+    sys.stdout.buffer.write(canonical_bytes(result) + b"\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, PackagingError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+        print(f"package-app: {error}", file=sys.stderr)
+        raise SystemExit(2)

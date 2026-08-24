@@ -1,0 +1,1 @@
+{"commandIDs":["app.install","app.launch","app.list","app.uninstall","device.info","device.status","screenshot.cli"],"deviceEvidenceRequired":true,"osRange":{"maximumMajorExclusive":17,"minimumMajor":14}}

@@ -1,0 +1,609 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import platform
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from typing import Any, Callable, Mapping, Optional, Sequence
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCHEMA = "pulsephone.element-analyzer-benchmark.v1"
+ENGINES = ("omniparser", "vision", "appleRegion")
+PHASES = ("cold", "first", "warm", "reconnect")
+MAX_COMMAND_OUTPUT_BYTES = 2 * 1024 * 1024
+MAX_REPORT_BYTES = 2 * 1024 * 1024
+UDID_HASH_DOMAIN = b"pulsephone.element-analyzer-benchmark.udid.v1\0"
+SAFE_TOKEN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+class AnalyzerBenchmarkError(RuntimeError):
+    pass
+
+
+Runner = Callable[[Sequence[str], float], subprocess.CompletedProcess[bytes]]
+
+
+def parse_args(arguments: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    parser.add_argument(
+        "--pulsephone",
+        required=True,
+        help="path to a PulsePhone executable",
+    )
+    parser.add_argument("--udid", required=True, help="target device identifier")
+    parser.add_argument(
+        "--phase",
+        choices=PHASES,
+        default="warm",
+        help="lifecycle phase to measure (default: warm)",
+    )
+    parser.add_argument("--runs", type=int, default=30, help="measured run count")
+    parser.add_argument(
+        "--warmups",
+        type=int,
+        default=None,
+        help="excluded warmups; defaults to 2 for warm and 0 otherwise",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=60.0,
+        help="per-snapshot timeout",
+    )
+    parser.add_argument(
+        "--stop-timeout-seconds",
+        type=float,
+        default=30.0,
+        help="public Runtime stop timeout for cold/first",
+    )
+    parsed = parser.parse_args(arguments)
+    supplied_warmups = parsed.warmups
+    if parsed.warmups is None:
+        parsed.warmups = 2 if parsed.phase == "warm" else 0
+    executable = Path(parsed.pulsephone).expanduser().resolve()
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        parser.error("pulsephone must be an executable regular file")
+    if not 1 <= len(parsed.udid.encode("utf-8")) <= 256 or "\x00" in parsed.udid:
+        parser.error("invalid UDID")
+    if not 1 <= parsed.runs <= 100:
+        parser.error("runs must be between 1 and 100")
+    if not 0 <= parsed.warmups <= 10:
+        parser.error("warmups must be between 0 and 10")
+    if not 1 <= parsed.timeout_seconds <= 120:
+        parser.error("timeout-seconds must be between 1 and 120")
+    if not 1 <= parsed.stop_timeout_seconds <= 60:
+        parser.error("stop-timeout-seconds must be between 1 and 60")
+    if parsed.phase == "first" and parsed.runs != 1:
+        parser.error("first phase requires exactly one run")
+    if parsed.phase != "warm" and supplied_warmups not in (None, 0):
+        parser.error("warmups are only valid for the warm phase")
+    parsed.pulsephone = str(executable)
+    return parsed
+
+
+def default_runner(command: Sequence[str], timeout: float) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        list(command),
+        check=False,
+        capture_output=True,
+        timeout=timeout,
+    )
+
+
+def bounded_stdout(completed: subprocess.CompletedProcess[bytes]) -> bytes:
+    stdout = completed.stdout
+    if not isinstance(stdout, bytes) or not 1 <= len(stdout) <= MAX_COMMAND_OUTPUT_BYTES:
+        raise AnalyzerBenchmarkError("invalid command output size")
+    return stdout
+
+
+def stop_runtime(
+    pulsephone: str,
+    udid: str,
+    timeout: float,
+    runner: Runner,
+) -> None:
+    completed = runner(
+        [pulsephone, "stop", "--udid", udid, "--json"],
+        timeout,
+    )
+    if completed.returncode != 0:
+        raise AnalyzerBenchmarkError("runtime stop failed")
+    bounded_stdout(completed)
+
+
+def invoke_snapshot(
+    pulsephone: str,
+    udid: str,
+    timeout: float,
+    phase: str,
+    sequence: int,
+    runner: Runner,
+) -> dict[str, Any]:
+    started = time.monotonic_ns()
+    completed = runner(
+        [
+            pulsephone,
+            "element",
+            "snapshot",
+            "--udid",
+            udid,
+            "--format",
+            "json",
+        ],
+        timeout,
+    )
+    wall_microseconds = elapsed_microseconds(started)
+    stdout = bounded_stdout(completed)
+    try:
+        envelope = json.loads(stdout)
+    except json.JSONDecodeError as error:
+        raise AnalyzerBenchmarkError("invalid command JSON") from error
+    if not isinstance(envelope, dict):
+        raise AnalyzerBenchmarkError("invalid command envelope")
+    if completed.returncode != 0 or envelope.get("ok") is not True:
+        error = envelope.get("error")
+        code = error.get("code") if isinstance(error, dict) else None
+        return {
+            "errorCode": safe_token(code) if isinstance(code, str) else "commandFailed",
+            "phase": phase,
+            "sequence": sequence,
+            "status": "error",
+            "wallMicroseconds": wall_microseconds,
+        }
+    if (
+        envelope.get("schemaVersion") != 1
+        or envelope.get("commandID") != "element.snapshot"
+        or not isinstance(envelope.get("result"), dict)
+    ):
+        raise AnalyzerBenchmarkError("unexpected command envelope")
+    return sanitize_result(
+        envelope["result"],
+        phase=phase,
+        sequence=sequence,
+        wall_microseconds=wall_microseconds,
+    )
+
+
+def sanitize_result(
+    result: Mapping[str, Any],
+    phase: str,
+    sequence: int,
+    wall_microseconds: int,
+) -> dict[str, Any]:
+    capture = require_mapping(result, "capture")
+    engines = require_mapping(result, "engines")
+    timings = require_mapping(result, "timings")
+    elements = result.get("elements")
+    degradation = result.get("degradationReasons")
+    if not isinstance(elements, list) or len(elements) > 256:
+        raise AnalyzerBenchmarkError("invalid element count")
+    if not isinstance(degradation, list) or any(item not in ENGINES for item in degradation):
+        raise AnalyzerBenchmarkError("invalid degradation reasons")
+    pixel_width = bounded_integer(capture.get("pixelWidth"), 1, 65_535)
+    pixel_height = bounded_integer(capture.get("pixelHeight"), 1, 65_535)
+    provider = safe_token(require_string(capture, "provider"))
+    attempts = capture.get("attempts")
+    if not isinstance(attempts, list) or not 1 <= len(attempts) <= 3:
+        raise AnalyzerBenchmarkError("invalid capture attempts")
+    sanitized_engines = {
+        name: sanitize_engine(require_mapping(engines, name)) for name in ENGINES
+    }
+    return {
+        "capture": {
+            "attempts": [sanitize_attempt(item) for item in attempts],
+            "pixelHeight": pixel_height,
+            "pixelWidth": pixel_width,
+            "provider": provider,
+        },
+        "degradationReasons": list(degradation),
+        "degraded": require_boolean(result, "degraded"),
+        "elementCount": len(elements),
+        "engines": sanitized_engines,
+        "phase": phase,
+        "pipelineTimingsMilliseconds": sanitize_pipeline_timings(timings),
+        "sequence": sequence,
+        "sourceDecodeMicroseconds": bounded_integer(
+            timings.get("sourceDecodeMicroseconds"), 0, 30_000_000
+        ),
+        "status": "ok",
+        "wallMicroseconds": wall_microseconds,
+    }
+
+
+def sanitize_attempt(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AnalyzerBenchmarkError("invalid capture attempt")
+    timings = require_mapping(value, "timings")
+    output = {
+        "captureMicroseconds": bounded_integer(
+            timings.get("captureMicroseconds"), 0, 30_000_000
+        ),
+        "provider": safe_token(require_string(value, "provider")),
+        "queueWaitMicroseconds": bounded_integer(
+            timings.get("queueWaitMicroseconds"), 0, 30_000_000
+        ),
+        "serviceCloseMicroseconds": bounded_integer(
+            timings.get("serviceCloseMicroseconds"), 0, 30_000_000
+        ),
+        "serviceOpenMicroseconds": bounded_integer(
+            timings.get("serviceOpenMicroseconds"), 0, 30_000_000
+        ),
+        "status": safe_token(require_string(value, "status")),
+        "totalMicroseconds": bounded_integer(
+            timings.get("totalMicroseconds"), 0, 30_000_000
+        ),
+    }
+    for key in ("errorCode", "failureStage"):
+        item = value.get(key)
+        output[key] = safe_token(item) if isinstance(item, str) else None
+    return output
+
+
+def sanitize_engine(engine: Mapping[str, Any]) -> dict[str, Any]:
+    elapsed = optional_milliseconds(engine.get("elapsedMilliseconds"), 10_000)
+    inference = optional_milliseconds(engine.get("inferenceMilliseconds"), 10_000)
+    queue = optional_milliseconds(engine.get("queueWaitMilliseconds"), 10_000)
+    return {
+        "backend": optional_token(engine.get("backend")),
+        "candidateCount": bounded_integer(engine.get("candidateCount"), 0, 2_048),
+        "elapsedMilliseconds": elapsed,
+        "inferenceMilliseconds": inference,
+        "inputHeight": optional_integer(engine.get("inputHeight"), 1, 65_535),
+        "inputWidth": optional_integer(engine.get("inputWidth"), 1, 65_535),
+        "profileID": safe_token(require_string(engine, "profileID")),
+        "queueWaitMilliseconds": queue,
+        "stageTimingsMicroseconds": sanitize_stage_timings(
+            require_mapping(engine, "stageTimings")
+        ),
+        "status": safe_token(require_string(engine, "status")),
+        "version": optional_token(engine.get("version")),
+    }
+
+
+def sanitize_stage_timings(timings: Mapping[str, Any]) -> dict[str, Optional[int]]:
+    keys = (
+        "inputEncodeMicroseconds",
+        "requestEncodeMicroseconds",
+        "resizeAndColorSpaceMicroseconds",
+        "responseDecodeMicroseconds",
+        "transportOverheadMicroseconds",
+        "transportRoundTripMicroseconds",
+    )
+    if set(timings) != set(keys):
+        raise AnalyzerBenchmarkError("invalid analyzer stage timings")
+    output = {
+        key: optional_integer(timings.get(key), 0, 60_000_000)
+        for key in keys
+    }
+    overhead = output["transportOverheadMicroseconds"]
+    round_trip = output["transportRoundTripMicroseconds"]
+    if overhead is not None and (round_trip is None or overhead > round_trip):
+        raise AnalyzerBenchmarkError("invalid analyzer transport timing")
+    return output
+
+
+def sanitize_pipeline_timings(timings: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "analyzerWall": bounded_integer(
+            timings.get("analyzerWallMilliseconds"), 0, 10_000
+        ),
+        "annotation": optional_milliseconds(
+            timings.get("annotationMilliseconds"), 5_000
+        ),
+        "capture": bounded_integer(
+            timings.get("captureMilliseconds"), 0, 30_000
+        ),
+        "correction": bounded_integer(
+            timings.get("correctionMilliseconds"), 0, 1_000
+        ),
+        "fusion": bounded_integer(
+            timings.get("fusionMilliseconds"), 0, 1_000
+        ),
+    }
+
+
+def collect(
+    arguments: argparse.Namespace,
+    runner: Runner = default_runner,
+) -> dict[str, Any]:
+    if arguments.phase == "first":
+        stop_runtime(
+            arguments.pulsephone,
+            arguments.udid,
+            arguments.stop_timeout_seconds,
+            runner,
+        )
+    for sequence in range(arguments.warmups):
+        warmup = invoke_snapshot(
+            arguments.pulsephone,
+            arguments.udid,
+            arguments.timeout_seconds,
+            phase="warmup",
+            sequence=sequence,
+            runner=runner,
+        )
+        if warmup["status"] != "ok":
+            raise AnalyzerBenchmarkError("warmup failed")
+    runs = []
+    for sequence in range(arguments.runs):
+        if arguments.phase == "cold":
+            stop_runtime(
+                arguments.pulsephone,
+                arguments.udid,
+                arguments.stop_timeout_seconds,
+                runner,
+            )
+        runs.append(invoke_snapshot(
+            arguments.pulsephone,
+            arguments.udid,
+            arguments.timeout_seconds,
+            phase=arguments.phase,
+            sequence=sequence,
+            runner=runner,
+        ))
+    document = {
+        "collectedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "environment": environment_metadata(arguments.udid, arguments.pulsephone),
+        "method": method_metadata(arguments),
+        "privacy": {
+            "elementContentPersisted": False,
+            "imageBytesPersisted": False,
+            "ocrTextPersisted": False,
+            "rawDeviceIdentifierEmitted": False,
+        },
+        "runs": runs,
+        "schema": SCHEMA,
+        "source": source_metadata(),
+        "stageCoverage": {
+            "engine": "reported",
+            "fusionCorrection": "reported",
+            "inputDecode": "reported",
+            "inputEncode": "reported",
+            "queue": "reported",
+            "requestEncode": "reported",
+            "resizeColorSpace": "reported",
+            "responseDecode": "reported",
+            "transport": "reported",
+        },
+        "status": "ok" if all(run["status"] == "ok" for run in runs) else "error",
+        "summary": summarize(runs),
+    }
+    return document
+
+
+def method_metadata(arguments: argparse.Namespace) -> dict[str, Any]:
+    descriptions = {
+        "cold": "public Runtime stop before every measured snapshot",
+        "first": "one public Runtime stop followed by the first measured snapshot",
+        "warm": "same Runtime/analyzer generation after excluded warmup snapshots",
+        "reconnect": "measured after an externally performed physical USB reconnect",
+    }
+    return {
+        "pageMutationRequested": False,
+        "phase": arguments.phase,
+        "phaseDefinition": descriptions[arguments.phase],
+        "runCount": arguments.runs,
+        "warmupCount": arguments.warmups,
+    }
+
+
+def summarize(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    successful = [run for run in runs if run.get("status") == "ok"]
+    summary: dict[str, Any] = {
+        "errorRunCount": len(runs) - len(successful),
+        "successfulRunCount": len(successful),
+    }
+    if not successful:
+        return summary
+    summary["wall"] = distribution([int(run["wallMicroseconds"]) for run in successful])
+    summary["sourceDecode"] = distribution([
+        int(run["sourceDecodeMicroseconds"]) for run in successful
+    ])
+    summary["elementCount"] = distribution([
+        int(run["elementCount"]) for run in successful
+    ], suffix="Count")
+    summary["captureProviders"] = counts([
+        run["capture"]["provider"] for run in successful
+    ])
+    summary["pipelineMilliseconds"] = {
+        key: distribution([
+            int(run["pipelineTimingsMilliseconds"][key]) for run in successful
+            if run["pipelineTimingsMilliseconds"][key] is not None
+        ], suffix="Milliseconds")
+        for key in ("analyzerWall", "capture", "correction", "fusion")
+    }
+    summary["engines"] = {}
+    for name in ENGINES:
+        engine_runs = [run["engines"][name] for run in successful]
+        metrics = {}
+        for key in (
+            "elapsedMilliseconds",
+            "inferenceMilliseconds",
+            "queueWaitMilliseconds",
+        ):
+            values = [int(engine[key]) for engine in engine_runs if engine[key] is not None]
+            metrics[key] = distribution(values, suffix="Milliseconds") if values else None
+        stage_metrics = {}
+        for key in (
+            "inputEncodeMicroseconds",
+            "requestEncodeMicroseconds",
+            "resizeAndColorSpaceMicroseconds",
+            "responseDecodeMicroseconds",
+            "transportOverheadMicroseconds",
+            "transportRoundTripMicroseconds",
+        ):
+            values = [
+                int(engine["stageTimingsMicroseconds"][key])
+                for engine in engine_runs
+                if engine["stageTimingsMicroseconds"][key] is not None
+            ]
+            stage_metrics[key] = distribution(values) if values else None
+        summary["engines"][name] = {
+            "metricsMilliseconds": metrics,
+            "stageMetricsMicroseconds": stage_metrics,
+            "statuses": counts([engine["status"] for engine in engine_runs]),
+        }
+    return summary
+
+
+def distribution(values: Sequence[int], suffix: str = "Microseconds") -> dict[str, int]:
+    if not values:
+        raise AnalyzerBenchmarkError("empty distribution")
+    return {
+        f"maximum{suffix}": max(values),
+        f"minimum{suffix}": min(values),
+        f"p50{suffix}": nearest_rank(values, 0.50),
+        f"p95{suffix}": nearest_rank(values, 0.95),
+    }
+
+
+def nearest_rank(values: Sequence[int], percentile: float) -> int:
+    if not values:
+        raise AnalyzerBenchmarkError("empty percentile input")
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(len(ordered) * percentile) - 1)]
+
+
+def counts(values: Sequence[str]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for value in values:
+        result[value] = result.get(value, 0) + 1
+    return dict(sorted(result.items()))
+
+
+def environment_metadata(udid: str, pulsephone: str) -> dict[str, Any]:
+    return {
+        "deviceIdentityHash": hashlib.sha256(
+            UDID_HASH_DOMAIN + udid.encode("utf-8")
+        ).hexdigest(),
+        "hostOS": platform.mac_ver()[0],
+        "pulsephoneSHA256": file_sha256(Path(pulsephone)),
+        "pythonVersion": platform.python_version(),
+    }
+
+
+def source_metadata() -> dict[str, Any]:
+    commit = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    dirty = bool(subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=normal"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout)
+    return {"commit": commit, "trackedTreeDirty": dirty}
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def elapsed_microseconds(started: int) -> int:
+    return max(0, time.monotonic_ns() - started) // 1_000
+
+
+def require_mapping(value: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    child = value.get(key)
+    if not isinstance(child, dict):
+        raise AnalyzerBenchmarkError(f"invalid {key}")
+    return child
+
+
+def require_string(value: Mapping[str, Any], key: str) -> str:
+    child = value.get(key)
+    if not isinstance(child, str):
+        raise AnalyzerBenchmarkError(f"invalid {key}")
+    return child
+
+
+def require_boolean(value: Mapping[str, Any], key: str) -> bool:
+    child = value.get(key)
+    if not isinstance(child, bool):
+        raise AnalyzerBenchmarkError(f"invalid {key}")
+    return child
+
+
+def safe_token(value: str) -> str:
+    if not SAFE_TOKEN.fullmatch(value):
+        raise AnalyzerBenchmarkError("invalid token")
+    return value
+
+
+def optional_token(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise AnalyzerBenchmarkError("invalid optional token")
+    return safe_token(value)
+
+
+def bounded_integer(value: Any, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise AnalyzerBenchmarkError("invalid integer")
+    if not minimum <= value <= maximum:
+        raise AnalyzerBenchmarkError("integer out of bounds")
+    return value
+
+
+def optional_integer(value: Any, minimum: int, maximum: int) -> Optional[int]:
+    if value is None:
+        return None
+    return bounded_integer(value, minimum, maximum)
+
+
+def optional_milliseconds(value: Any, maximum: int) -> Optional[int]:
+    return optional_integer(value, 0, maximum)
+
+
+def encode_document(document: Mapping[str, Any]) -> bytes:
+    encoded = json.dumps(
+        document,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(encoded) > MAX_REPORT_BYTES:
+        raise AnalyzerBenchmarkError("benchmark output exceeds byte cap")
+    return encoded + b"\n"
+
+
+def main(arguments: Optional[Sequence[str]] = None) -> int:
+    parsed = parse_args(arguments)
+    document = collect(parsed)
+    sys.stdout.buffer.write(encode_document(document))
+    return 0 if document["status"] == "ok" else 1
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (AnalyzerBenchmarkError, OSError, subprocess.SubprocessError) as error:
+        failure = {
+            "errorType": type(error).__name__,
+            "schema": SCHEMA,
+            "status": "error",
+        }
+        sys.stdout.buffer.write(encode_document(failure))
+        raise SystemExit(1)

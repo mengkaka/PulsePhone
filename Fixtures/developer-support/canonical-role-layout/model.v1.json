@@ -1,0 +1,1 @@
+{"manifestName":"manifest.v1.json","roleBase":"assets/<assetKey>/roles","roles":["classic.image","classic.signature","personalized.buildManifest","personalized.image","personalized.trustCache"],"schemaVersion":1}

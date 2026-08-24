@@ -1,0 +1,9 @@
+PulsePhone native helper release notice
+
+This release bundle contains native Swift and Go executables. The Go helpers
+are built with the Go standard library and CGO is disabled for the release
+build.
+
+The Go toolchain license is included in `go/Go-LICENSE.txt`. The source and
+dependency inventory for this candidate is
+`Packaging/manifests/go-dependency-inventory.json`.

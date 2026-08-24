@@ -1,0 +1,1 @@
+{"$id":"liveLaunchResult.v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"disposition":{"enum":["alreadyOpen","opened"],"type":"string"},"liveOwnerID":{"maxLength":128,"type":"string"}},"required":["disposition","liveOwnerID"],"type":"object","x-pulsephone-maxEncodedBytes":4096}

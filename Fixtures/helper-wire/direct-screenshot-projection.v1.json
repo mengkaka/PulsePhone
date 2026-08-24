@@ -1,0 +1,101 @@
+{
+  "cases": [
+    {
+      "code": "artifactValidationFailed",
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {"code": "artifactValidationFailed", "details": {"stage": "reservation"}},
+        "outcome": "failed"
+      },
+      "name": "reservationFailureOnlyExposesArtifactStage",
+      "stage": "reservation",
+      "transition": "artifactFailure"
+    },
+    {
+      "code": "artifactTooLarge",
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {"code": "artifactTooLarge", "details": {"stage": "formatConversion"}},
+        "outcome": "failed"
+      },
+      "name": "normalizedScreenshotTooLarge",
+      "stage": "formatConversion",
+      "transition": "artifactFailure"
+    },
+    {
+      "code": "unsupportedScreenshotFormat",
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {"code": "unsupportedScreenshotFormat", "details": {"stage": "formatConversion"}},
+        "outcome": "failed"
+      },
+      "name": "unsupportedSourceFormat",
+      "stage": "formatConversion",
+      "transition": "artifactFailure"
+    },
+    {
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "executionTimeout",
+          "details": {"commitState": "notCommitted", "stage": "screenshotDeadline"}
+        },
+        "outcome": "failed"
+      },
+      "name": "screenshotDeadline",
+      "transition": "deadline"
+    },
+    {
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "developerServicesUnavailable",
+          "details": {
+            "phase": "startingDeviceServices",
+            "preparationGroupID": "prep.legacy.developer.v2"
+          }
+        },
+        "outcome": "failed"
+      },
+      "name": "legacyServiceStartupFailurePreservesPreparationIdentity",
+      "transition": "serviceUnavailable"
+    },
+    {
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {"code": "deviceDisconnected"},
+        "outcome": "failed"
+      },
+      "name": "missingDeviceProjectsDisconnectedWithoutStage",
+      "transition": "deviceDisconnected"
+    },
+    {
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {"code": "deviceNotTrusted"},
+        "outcome": "failed"
+      },
+      "name": "deviceTrustFailureRemainsPublic",
+      "transition": "deviceNotTrusted"
+    },
+    {
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {"code": "deviceLocked"},
+        "outcome": "failed"
+      },
+      "name": "deviceLockFailureRemainsPublic",
+      "transition": "deviceLocked"
+    },
+    {
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {"code": "transportFailure"},
+        "outcome": "failed"
+      },
+      "name": "transportFailureRemainsPublic",
+      "transition": "transportFailure"
+    }
+  ],
+  "schemaVersion": 1
+}

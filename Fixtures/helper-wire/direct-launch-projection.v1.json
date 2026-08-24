@@ -1,0 +1,49 @@
+{
+  "cases": [
+    {
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "developerServicesUnavailable",
+          "details": {
+            "phase": "startingDeviceServices",
+            "preparationGroupID": "prep.legacy.developer.v2"
+          }
+        },
+        "outcome": "failed"
+      },
+      "name": "dvtStartupFailurePreservesLegacyPreparationGroup",
+      "transition": "startupUnavailable"
+    },
+    {
+      "expectedResult": {
+        "commitState": "notCommitted",
+        "error": {
+          "code": "appLaunchFailed",
+          "details": {
+            "commitState": "notCommitted",
+            "stage": "dvtLaunchResponse"
+          }
+        },
+        "outcome": "failed"
+      },
+      "name": "dvtLaunchRejectionIsNotCommitted",
+      "transition": "rejected"
+    },
+    {
+      "expectedResult": {
+        "commitState": "unknown",
+        "error": {
+          "code": "outcomeUnknown",
+          "details": {
+            "reason": "commitStateUnknown"
+          }
+        },
+        "outcome": "outcomeUnknown"
+      },
+      "name": "postSubmitTransportOutcomeIsUnknown",
+      "transition": "outcomeUnknown"
+    }
+  ],
+  "schemaVersion": 1
+}

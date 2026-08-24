@@ -1,0 +1,1 @@
+{"changedContractPaths":["README.md","Registries/command-catalog.v1.json"],"grantedContractPaths":["README.md","Registries/command-catalog.v1.json"],"reopenedGates":["M0-900","M2-900"],"surfaceValidation":{"catalog":"passed","cli":"passed","docs":"passed","gui":"passed","help":"passed","policy":"passed","tests":"passed"}}

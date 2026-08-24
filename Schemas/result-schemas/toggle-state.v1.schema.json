@@ -1,0 +1,1 @@
+{"$id":"toggleStateResult.v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"active":{"type":"boolean"},"enabled":{"type":"boolean"},"unavailableReason":{"maxLength":256,"type":"string"}},"required":["active","enabled"],"type":"object","x-pulsephone-maxEncodedBytes":4096}

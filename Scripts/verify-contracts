@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import os
+import runpy
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Sequence
+
+
+ROOT = Path(__file__).resolve().parents[1]
+EVIDENCE_TOOL = ROOT / "Scripts/evidence-tool"
+CURRENT_PROFILE_ROOT = ROOT / "Fixtures/developer-support/routing/current-profile.v1.json"
+COMMAND_MATRIX_DOMAIN = "pulsephone.command-matrix-set.v1"
+DEVELOPER_IMAGE_CATALOG_DOMAIN = "pulsephone.developer-image-catalog.v1"
+
+
+def legacy_profile(profile: str) -> None:
+    os.execv(
+        str(EVIDENCE_TOOL),
+        [str(EVIDENCE_TOOL), "contracts", "verify", "--profile", profile],
+    )
+
+
+def require_sorted_unique_strings(
+    require: Any, values: Any, context: str
+) -> List[str]:
+    require(
+        isinstance(values, list) and all(isinstance(item, str) for item in values),
+        context,
+    )
+    require(
+        values == sorted(set(values), key=lambda item: item.encode("ascii")),
+        context,
+    )
+    return values
+
+
+def current_profile_paths(
+    tool: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    key: str,
+    fixed: Sequence[str],
+    directories: Sequence[str],
+) -> List[str]:
+    require = tool["require"]
+    relative_path = tool["relative_path"]
+    declared = require_sorted_unique_strings(
+        require, profile.get(key), f"current profile {key}"
+    )
+    actual = list(fixed)
+    for directory in directories:
+        root = ROOT / directory
+        require(
+            root.is_dir() and not root.is_symlink(),
+            f"current profile directory: {directory}",
+        )
+        actual.extend(relative_path(path) for path in root.rglob("*.json"))
+    actual = sorted(actual, key=lambda item: item.encode("ascii"))
+    require(declared == actual, f"current profile member set: {key}")
+    return declared
+
+
+def verify_current_contracts(tool: Mapping[str, Any]) -> Dict[str, Any]:
+    require = tool["require"]
+    load_canonical = tool["load_canonical"]
+    aggregate_registry_set = tool["aggregate_registry_set"]
+    artifact_set = tool["artifact_set"]
+    domain_hash = tool["domain_hash"]
+
+    bootstrap_result = tool["verify_bootstrap_contracts"]()
+    profile = load_canonical(CURRENT_PROFILE_ROOT)
+    require(profile.get("schemaVersion") == 1, "current profile schema version")
+    require(profile.get("profileID") == "contracts.current.v1", "current profile ID")
+    require(
+        profile.get("crossSetDependencyGraph")
+        == {
+            "commandMatrix": ["standardErrorRegistry", "wireRegistry"],
+            "developerImageCatalog": ["commandMatrix"],
+            "standardErrorRegistry": [],
+            "wireRegistry": ["standardErrorRegistry"],
+        },
+        "current dependency graph",
+    )
+
+    standard_paths = current_profile_paths(
+        tool,
+        profile,
+        "standardErrorRegistryMembers",
+        ["Registries/standard-errors.v1.json"],
+        ["Schemas/details-schemas"],
+    )
+    wire_paths = current_profile_paths(
+        tool,
+        profile,
+        "wireRegistryMembers",
+        [
+            "Registries/facts-probe-wire.v1.json",
+            "Registries/guihost-wire.v1.json",
+            "Registries/helper-wire.v1.json",
+            "Registries/runtime-operations.v1.json",
+            "Registries/runtime-wire-messages.v1.json",
+        ],
+        ["Schemas/wire"],
+    )
+    command_paths = current_profile_paths(
+        tool,
+        profile,
+        "commandMatrixMembers",
+        [
+            "Registries/command-catalog.v1.json",
+            "Registries/preparation-groups.v1.json",
+            "Schemas/command-catalog.v1.schema.json",
+        ],
+        ["Schemas/developer-support", "Schemas/result-schemas"],
+    )
+
+    standard = load_canonical(ROOT / "Registries/standard-errors.v1.json")
+    errors = standard.get("entries")
+    require(standard.get("setID") == "standardErrorRegistry", "current standard set ID")
+    require(
+        isinstance(errors, list) and len(errors) == 87,
+        "current standard error count",
+    )
+    error_codes = {entry["code"] for entry in errors}
+    standard_hash = aggregate_registry_set(
+        "standardErrorRegistry",
+        standard["revision"],
+        standard_paths,
+        "pulsephone.standard-error-registry-set.v1",
+    )
+
+    wire = load_canonical(ROOT / "Registries/runtime-wire-messages.v1.json")
+    wire_revision = wire.get("revision")
+    require(isinstance(wire_revision, str), "current wire revision")
+    wire_hash = aggregate_registry_set(
+        "wireRegistry",
+        wire_revision,
+        wire_paths,
+        "pulsephone.wire-registry-set.v1",
+    )
+
+    command = load_canonical(ROOT / "Registries/command-catalog.v1.json")
+    preparation = load_canonical(ROOT / "Registries/preparation-groups.v1.json")
+    matrix_revision = command.get("matrixRevision")
+    require(isinstance(matrix_revision, str), "current matrix revision")
+    require(
+        preparation.get("matrixRevision") == matrix_revision,
+        "preparation matrix revision",
+    )
+    product_actions = command.get("productActions")
+    supporting_actions = command.get("supportingActions")
+    features = command.get("features")
+    compatibility_rules = command.get("compatibilityRules")
+    preparation_groups = preparation.get("preparationGroups")
+    require(
+        isinstance(product_actions, list) and len(product_actions) == 52,
+        "current product actions",
+    )
+    require(
+        isinstance(supporting_actions, list) and len(supporting_actions) == 21,
+        "current supporting actions",
+    )
+    require(isinstance(features, list) and len(features) == 6, "current features")
+    require(isinstance(compatibility_rules, list), "current compatibility rules")
+    require(
+        isinstance(preparation_groups, list) and len(preparation_groups) == 3,
+        "current preparation groups",
+    )
+
+    compatibility_rule_ids = {item["ruleID"] for item in compatibility_rules}
+    result_schema_paths = set(command_paths)
+    for row in [*product_actions, *supporting_actions]:
+        row_id = row.get("commandID", row.get("supportingActionID"))
+        require(
+            row["resultSchemaRef"] in result_schema_paths,
+            f"result schema ref: {row_id}",
+        )
+        bindings = row.get("policyBindings")
+        require(isinstance(bindings, dict), f"current policy bindings: {row_id}")
+        require(
+            bindings.get("compatibilityRuleID") in compatibility_rule_ids,
+            f"current compatibility binding: {row_id}",
+        )
+        require(
+            set(bindings.get("allowedErrorCodes", [])) <= error_codes,
+            f"current standard error binding: {row_id}",
+        )
+    for group in preparation_groups:
+        require(
+            group.get("compatibilityRuleID") in compatibility_rule_ids,
+            f"preparation compatibility binding: {group.get('preparationGroupID')}",
+        )
+
+    command_projection = artifact_set("commandMatrix", matrix_revision, command_paths)
+    projection_path = profile.get("commandMatrixProjectionRelativePath")
+    require(isinstance(projection_path, str), "command projection path")
+    require(
+        command_projection == load_canonical(ROOT / projection_path),
+        "command matrix artifact-set projection",
+    )
+    command_hash = domain_hash(COMMAND_MATRIX_DOMAIN, command_projection)
+
+    catalog_path = profile.get("developerImageCatalogRelativePath")
+    require(
+        catalog_path == "Registries/developer-image-catalog.v1.json",
+        "current catalog path",
+    )
+    catalog = load_canonical(ROOT / catalog_path)
+    catalog_revision = catalog.get("catalogRevision")
+    entries = catalog.get("entries")
+    require(isinstance(catalog_revision, str), "current catalog revision")
+    require(isinstance(entries, list), "current catalog entries")
+    for entry in entries:
+        require(
+            entry.get("compatibilityRuleID") in compatibility_rule_ids,
+            f"catalog compatibility binding: {entry.get('entryID')}",
+        )
+    catalog_hash = domain_hash(DEVELOPER_IMAGE_CATALOG_DOMAIN, catalog)
+
+    execution_path = profile.get("executionCatalogIdentityRelativePath")
+    require(
+        execution_path == "Fixtures/catalog/identity/execution-catalog-identity.v1.json",
+        "execution identity path",
+    )
+    execution = load_canonical(ROOT / execution_path)
+    require(
+        execution.get("domainID") == "pulsephone.execution-catalog.v1",
+        "execution identity domain",
+    )
+
+    product_ids = {item["commandID"] for item in product_actions}
+    feature_ids = {item["featureID"] for item in features}
+    preparation_ids = {item["preparationGroupID"] for item in preparation_groups}
+    route_ids = {item["route"] for item in preparation_groups}
+    policy = load_canonical(ROOT / "Verification/evidence-policy.v1.json")
+    for subject in policy["subjectSets"]:
+        subject_id = subject["subjectSetID"]
+        require(
+            set(subject["productActionIDs"]) <= product_ids,
+            f"policy product IDs: {subject_id}",
+        )
+        require(
+            set(subject["nonCommandFeatureIDs"]) <= feature_ids,
+            f"policy feature IDs: {subject_id}",
+        )
+        require(
+            set(subject["preparationGroupIDs"]) <= preparation_ids,
+            f"policy preparation IDs: {subject_id}",
+        )
+        require(
+            set(subject["routes"]) <= route_ids,
+            f"policy routes: {subject_id}",
+        )
+
+    identity = {
+        "commandMatrix": {"revision": matrix_revision, "sha256": command_hash},
+        "developerImageCatalog": {
+            "hash": catalog_hash,
+            "revision": catalog_revision,
+        },
+        "executionCatalogHash": execution["executionCatalogHash"],
+        "plannerContractVersion": execution["plannerContractVersion"],
+        "standardErrorRegistry": {
+            "revision": standard["revision"],
+            "sha256": standard_hash,
+        },
+        "wireRegistry": {"revision": wire_revision, "sha256": wire_hash},
+    }
+    identity_path = profile.get("implementationContractIdentityRelativePath")
+    require(isinstance(identity_path, str), "implementation identity path")
+    require(
+        identity == load_canonical(ROOT / identity_path),
+        "current implementation identity",
+    )
+    require(
+        standard_hash == bootstrap_result["standardErrorRegistryHash"],
+        "current/bootstrap standard identity",
+    )
+    require(
+        wire_hash == bootstrap_result["wireRegistryHash"],
+        "current/bootstrap wire identity",
+    )
+    return {
+        "implementationContractIdentity": identity,
+        "outcome": "passed",
+        "policyPublicIDCounts": {
+            "features": len(feature_ids),
+            "preparationGroups": len(preparation_ids),
+            "productActions": len(product_ids),
+            "routes": len(route_ids),
+        },
+        "profile": "current",
+    }
+
+
+def main(argv: Sequence[str]) -> int:
+    if len(argv) != 2 or argv[1] not in (
+        "bootstrap",
+        "current",
+        "evidence-policy-structural",
+    ):
+        print(
+            f"usage: {argv[0]} <evidence-policy-structural|bootstrap|current>",
+            file=sys.stderr,
+        )
+        return 2
+    if argv[1] != "current":
+        legacy_profile(argv[1])
+        return 0
+
+    tool = runpy.run_path(str(EVIDENCE_TOOL), run_name="pulsephone_evidence_tool")
+    try:
+        tool["print_json"](verify_current_contracts(tool))
+    except tool["ContractError"] as error:
+        print(f"contract error: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

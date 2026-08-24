@@ -1,0 +1,1 @@
+{"approvalPath":"Fixtures/performance/threshold-profile/approval.v1.json","decisionPath":"Fixtures/performance/threshold-decision/decision.v1.json","minimumBaselineRuns":3,"profilePath":"Fixtures/performance/threshold-profile/profile.v1.json","requiredArtifacts":["performanceThresholdApproval","performanceThresholdDecision","performanceThresholdProfile"]}

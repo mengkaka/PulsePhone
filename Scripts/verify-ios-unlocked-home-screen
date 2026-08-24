@@ -1,0 +1,58 @@
+#!/usr/bin/env swift
+import AppKit
+import Foundation
+import Vision
+
+let arguments = Array(CommandLine.arguments.dropFirst())
+guard !arguments.isEmpty else {
+    fputs("usage: verify-ios-unlocked-home-screen PNG --require-token TOKEN ...\n", stderr)
+    exit(2)
+}
+
+let imagePath = arguments[0]
+var requiredTokens: [String] = []
+var index = 1
+while index < arguments.count {
+    guard arguments[index] == "--require-token", index + 1 < arguments.count else {
+        fputs("invalid arguments\n", stderr)
+        exit(2)
+    }
+    requiredTokens.append(arguments[index + 1])
+    index += 2
+}
+guard !requiredTokens.isEmpty else {
+    fputs("at least one --require-token is required\n", stderr)
+    exit(2)
+}
+guard let image = NSImage(contentsOfFile: imagePath),
+      let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+else {
+    fputs("could not read PNG\n", stderr)
+    exit(2)
+}
+
+let request = VNRecognizeTextRequest()
+request.recognitionLevel = .accurate
+request.usesLanguageCorrection = false
+request.recognitionLanguages = ["zh-Hans", "en-US"]
+
+do {
+    try VNImageRequestHandler(cgImage: cgImage).perform([request])
+    let detectedTokens = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+    let missingTokens = requiredTokens.filter { token in
+        !detectedTokens.contains { detected in detected.contains(token) }
+    }
+    let result: [String: Any] = [
+        "detectedTokens": detectedTokens,
+        "kind": "unlockedHome",
+        "missingTokens": missingTokens,
+        "passed": missingTokens.isEmpty,
+        "requiredTokens": requiredTokens,
+    ]
+    let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write(Data([0x0A]))
+} catch {
+    fputs("Vision OCR failed: \(error)\n", stderr)
+    exit(2)
+}

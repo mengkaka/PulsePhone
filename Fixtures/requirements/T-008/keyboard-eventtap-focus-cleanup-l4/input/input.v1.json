@@ -1,0 +1,1 @@
+{"events":[{"isPressed":true,"kind":"keyDown","usage":4},{"isPressed":true,"kind":"flagsChanged","usage":225},{"isPressed":false,"kind":"keyUp","usage":4},{"isPressed":false,"kind":"flagsChanged","usage":225}],"expectedPressedSets":[["0007:0004"],["0007:0004","0007:00e1"],["0007:00e1"],[]],"maximumOpeningFrames":32}

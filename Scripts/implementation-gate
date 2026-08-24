@@ -1,0 +1,535 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import importlib.machinery
+import importlib.util
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
+
+
+ROOT = Path(__file__).resolve().parents[1]
+LOADER = importlib.machinery.SourceFileLoader(
+    "pulsephone_evidence_tool", str(ROOT / "Scripts/evidence-tool")
+)
+SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
+if SPEC is None:
+    raise RuntimeError("cannot load evidence-tool")
+EVIDENCE = importlib.util.module_from_spec(SPEC)
+LOADER.exec_module(EVIDENCE)
+
+
+ALLOWED_REASON_CODES = {
+    "checker.failed",
+    "checker.not-ready",
+    "checker.passed",
+    "input.hash-mismatch",
+    "input.identity-mismatch",
+    "input.invalid",
+    "input.missing",
+    "input.schema-invalid",
+    "source.after-mismatch",
+    "source.grant-mismatch",
+    "source.policy-mismatch",
+}
+
+
+CHECKER_COMMANDS: Dict[str, Sequence[str]] = {
+    "m0.repository-structure": ["/usr/bin/make", "--no-print-directory", "verify-structure"],
+    "m0.contract-foundation": ["/usr/bin/make", "--no-print-directory", "verify-contracts-current"],
+    "m0.evidence-policy-structural": ["/usr/bin/make", "--no-print-directory", "verify-evidence-policy-structural"],
+    "m1.runtime-foundation": ["/usr/bin/xcrun", "swift", "test", "--filter", "RuntimeBootstrapTests"],
+    "m1.device-access-foundation": ["/usr/bin/xcrun", "swift", "test", "--filter", "DeveloperSupportHelperTests"],
+    "m1.full-check": ["/usr/bin/make", "--no-print-directory", "check"],
+    "m2.product-integration": ["/usr/bin/xcrun", "swift", "test", "--filter", "ProductActionTests"],
+    "m2.public-surface-projection": ["/usr/bin/make", "--no-print-directory", "verify-command-matrix"],
+    "m2.full-check": ["/usr/bin/make", "--no-print-directory", "check"],
+}
+
+
+def require(condition: bool, message: str) -> None:
+    EVIDENCE.require(condition, message)
+
+
+def parse_make_variables(values: Sequence[str]) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    for value in values:
+        require("=" in value, f"invalid make variable: {value}")
+        name, variable_value = value.split("=", 1)
+        require(name.startswith("GATE_"), f"foreign make variable: {name}")
+        require(name not in result, f"duplicate make variable: {name}")
+        require(variable_value != "", f"empty make variable: {name}")
+        result[name] = variable_value
+    return result
+
+
+def gate_for_target(definition: Mapping[str, Any], target: str) -> Dict[str, Any]:
+    matches = [gate for gate in definition["gates"] if gate["makeTarget"] == target]
+    require(len(matches) == 1, f"unknown target: {target}")
+    return matches[0]
+
+
+def selected_policy(gate: Mapping[str, Any], variables: Mapping[str, str]) -> Dict[str, Any]:
+    requested = variables.get("GATE_SOURCE_POLICY_ID", "normal")
+    matches = [
+        policy
+        for policy in gate["sourcePolicies"]
+        if policy["sourcePolicyID"] == requested
+    ]
+    require(len(matches) == 1, f"unknown source policy: {requested}")
+    return matches[0]
+
+
+def effective_contract(
+    gate: Mapping[str, Any], policy: Mapping[str, Any]
+) -> Tuple[List[str], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    identities = sorted(
+        [*gate["baseRequiredIdentityFields"], *policy["additionalRequiredIdentityFields"]]
+    )
+    slots = sorted(
+        [*gate["baseInputSlots"], *policy["additionalInputSlots"]],
+        key=lambda item: item["inputRole"],
+    )
+    checks = sorted(
+        [*gate["baseChecks"], *policy["additionalChecks"]],
+        key=lambda item: item["checkID"],
+    )
+    return identities, slots, checks
+
+
+def allowed_variables(gate: Mapping[str, Any], policy: Mapping[str, Any]) -> set[str]:
+    _, slots, _ = effective_contract(gate, policy)
+    names = {
+        slot["locator"]["value"]
+        for slot in slots
+        if slot["locator"]["kind"] == "commandLineMakeVariable"
+    }
+    if policy["sourcePolicyID"] != "normal":
+        names.add("GATE_SOURCE_POLICY_ID")
+    return names
+
+
+def schema_id_for_ref(schema_ref: str) -> str:
+    path_part = schema_ref.split("#", 1)[0]
+    path = ROOT / path_part
+    schema = EVIDENCE.load_canonical(path)
+    schema_id = schema.get("$id")
+    require(isinstance(schema_id, str), f"schema ID missing: {schema_ref}")
+    return schema_id
+
+
+def validate_input_shape(schema_id: str, value: Mapping[str, Any]) -> None:
+    expected = {
+        "evidenceStoreRecord.v1": [
+            "evidenceStoreBindingID",
+            "manifestSHA256",
+            "manifestStoreRef",
+            "packageID",
+            "packageKind",
+            "schemaVersion",
+        ],
+        "evidenceReleaseHold.v1": [
+            "evidenceStoreBindingID",
+            "manifestSHA256",
+            "manifestStoreRef",
+            "releaseFlowID",
+            "releaseHoldID",
+            "schemaVersion",
+            "storeRecordSHA256",
+        ],
+        "negativeRemovalWriteGrant.v1": [
+            "evidenceStoreBindingID",
+            "grantID",
+            "releaseFlowID",
+            "repositoryBaseCommit",
+            "schemaVersion",
+        ],
+        "finalReleaseEvidenceGateReport.v1": [
+            "evidenceStoreBindingID",
+            "finalManifestSHA256",
+            "finalManifestStoreRef",
+            "finalStageManifestID",
+            "outcome",
+            "releaseFlowID",
+            "schemaVersion",
+        ],
+    }
+    require(schema_id in expected, f"unsupported gate input schema: {schema_id}")
+    require(value.get("schemaVersion") == 1, f"input schema version: {schema_id}")
+    require(all(key in value for key in expected[schema_id]), f"input schema required fields: {schema_id}")
+
+
+def resolve_slot(
+    slot: Mapping[str, Any], variables: Mapping[str, str]
+) -> Tuple[Dict[str, Any], Mapping[str, Any] | None]:
+    role = slot["inputRole"]
+    locator = slot["locator"]
+    path_value: str | None
+    if locator["kind"] == "fixedRelativePath":
+        path_value = locator["value"]
+    else:
+        path_value = variables.get(locator["value"])
+    if path_value is None:
+        return (
+            {
+                "artifacts": [],
+                "inputRole": role,
+                "reasonCodes": ["input.missing"],
+                "resolutionOutcome": "unknown",
+                "schemaRef": slot["schemaRef"],
+            },
+            None,
+        )
+    try:
+        EVIDENCE.validate_relative_path(path_value)
+        value = EVIDENCE.load_canonical(ROOT / path_value)
+        schema_id = schema_id_for_ref(slot["schemaRef"])
+        validate_input_shape(schema_id, value)
+        data = (ROOT / path_value).read_bytes()
+        return (
+            {
+                "artifacts": [{"artifactSHA256": EVIDENCE.sha256_bytes(data)}],
+                "inputRole": role,
+                "reasonCodes": [],
+                "resolutionOutcome": "passed",
+                "schemaRef": slot["schemaRef"],
+            },
+            value,
+        )
+    except (EVIDENCE.ContractError, EVIDENCE.CanonicalJSONError, KeyError, TypeError, ValueError):
+        return (
+            {
+                "artifacts": [],
+                "inputRole": role,
+                "reasonCodes": ["input.invalid"],
+                "resolutionOutcome": "failed",
+                "schemaRef": slot["schemaRef"],
+            },
+            None,
+        )
+
+
+def run_checker(
+    check: Mapping[str, Any],
+    resolved_inputs: Mapping[str, Mapping[str, Any]],
+    source: Mapping[str, Any],
+) -> Dict[str, Any]:
+    checker_id = check["checkerID"]
+    outcome = "unknown"
+    reasons = ["checker.not-ready"]
+    if checker_id in CHECKER_COMMANDS:
+        environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        if CHECKER_COMMANDS[checker_id][:3] == ["/usr/bin/xcrun", "swift", "test"]:
+            environment["DEVELOPER_DIR"] = subprocess.run(
+                ["/usr/bin/xcode-select", "-p"],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+        result = subprocess.run(
+            CHECKER_COMMANDS[checker_id],
+            cwd=ROOT,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        output = result.stdout
+        not_ready = (
+            "No rule to make target" in output
+            or "No matching test cases were run" in output
+            or "0 tests passed" in output
+        )
+        if not_ready:
+            outcome, reasons = "unknown", ["checker.not-ready"]
+        elif result.returncode == 0:
+            outcome, reasons = "passed", ["checker.passed"]
+        else:
+            outcome, reasons = "failed", ["checker.failed"]
+    elif checker_id.endswith("grant-snapshot-binding"):
+        grant = resolved_inputs.get("negativeRemovalWriteGrant")
+        if grant is None:
+            outcome, reasons = "unknown", ["checker.not-ready"]
+        elif grant.get("repositoryBaseCommit") != source["gitHeadCommit"]:
+            outcome, reasons = "failed", ["source.grant-mismatch"]
+        else:
+            outcome, reasons = "passed", ["checker.passed"]
+    result_value = {
+        "checkID": check["checkID"],
+        "checkerID": checker_id,
+        "outcome": outcome,
+        "reasonCodes": sorted(reasons),
+        "schemaVersion": 1,
+    }
+    require(set(result_value["reasonCodes"]) <= ALLOWED_REASON_CODES, "checker reason code")
+    return {
+        "checkID": check["checkID"],
+        "checkerID": checker_id,
+        "outcome": outcome,
+        "resultSHA256": EVIDENCE.sha256_bytes(EVIDENCE.canonical_bytes(result_value)),
+        "resultSchemaRef": check["resultSchemaRef"],
+    }
+
+
+def aggregate_outcome(outcomes: Sequence[str]) -> str:
+    if "failed" in outcomes:
+        return "failed"
+    if "unknown" in outcomes:
+        return "unknown"
+    return "passed"
+
+
+def source_allowed(
+    policy: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    resolved_inputs: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    entries = snapshot["entries"]
+    state = snapshot["worktreeState"]
+    require((state == "clean") == (entries == []), "source clean equivalence")
+    require((state == "taskOwnedDirty") == (entries != []), "source dirty equivalence")
+    if policy["mode"] == "clean":
+        return state == "clean"
+    authority = policy["pathAuthority"]
+    if state == "clean":
+        return True
+    if authority == "definitionAllowlist":
+        rules = policy["allowedPathRules"]
+        for entry in entries:
+            path = entry["relativePath"]
+            if not any(
+                path == rule["path"]
+                if rule["kind"] == "exactFile"
+                else path.startswith(rule["path"])
+                for rule in rules
+            ):
+                return False
+        return True
+    if authority == "negativeRemovalWriteGrant":
+        grant = resolved_inputs.get(policy["pathAuthorityInputRole"])
+        if grant is None:
+            return False
+        granted = {
+            item["relativePath"] for item in grant.get("grantedContractArtifacts", [])
+        }
+        return {entry["relativePath"] for entry in entries} <= granted
+    return False
+
+
+def project_identities(
+    required: Sequence[str],
+    resolved_inputs: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    projected: Dict[str, Any] = {}
+    if "implementationContract" in required:
+        projected["implementationContractIdentity"] = EVIDENCE.implementation_contract_identity()
+    if "evidencePolicy" in required:
+        identity = EVIDENCE.policy_identity()
+        projected["evidencePolicy"] = {
+            "hash": identity["hash"],
+            "policyID": identity["policyID"],
+        }
+    grant = resolved_inputs.get("negativeRemovalWriteGrant")
+    if "negativeRemovalWriteGrant" in required and grant is not None:
+        projected["negativeRemovalWriteGrant"] = {
+            "grantID": grant["grantID"],
+            "writeGrantHash": EVIDENCE.domain_hash(
+                "pulsephone.negative-removal-write-grant.v1", grant
+            ),
+        }
+        if "releaseFlow" in required:
+            projected["releaseFlow"] = {
+                "evidenceStoreBindingID": grant["evidenceStoreBindingID"],
+                "releaseFlowID": grant["releaseFlowID"],
+            }
+    record = resolved_inputs.get("negativeRemovalPlanRecord")
+    if "negativeRemovalPlan" in required and record is not None:
+        projected["negativeRemovalPlan"] = {
+            "planHash": record["manifestSHA256"],
+            "planID": record["packageID"],
+        }
+        if "releaseFlow" in required and record.get("releaseFlowID"):
+            projected["releaseFlow"] = {
+                "evidenceStoreBindingID": record["evidenceStoreBindingID"],
+                "releaseFlowID": record["releaseFlowID"],
+            }
+    return projected
+
+
+def self_test() -> Dict[str, Any]:
+    for cardinality, expected in {
+        "exactlyOne": (1, 1),
+        "oneOrMore": (1, 65536),
+        "zeroOrMore": (0, 65536),
+        "zeroOrOne": (0, 1),
+    }.items():
+        require(EVIDENCE.cardinality_bounds(cardinality) == expected, f"cardinality {cardinality}")
+    clean = {
+        "entries": [],
+        "gitHeadCommit": "0" * 40,
+        "schemaVersion": 1,
+        "worktreeState": "clean",
+    }
+    dirty = {
+        "entries": [
+            {
+                "byteLength": 0,
+                "gitMode": "100644",
+                "pathState": "modified",
+                "relativePath": "README.md",
+                "sha256": EVIDENCE.sha256_bytes(b""),
+            }
+        ],
+        "gitHeadCommit": "0" * 40,
+        "schemaVersion": 1,
+        "worktreeState": "taskOwnedDirty",
+    }
+    normal_clean = {
+        "additionalChecks": [],
+        "additionalInputSlots": [],
+        "additionalRequiredIdentityFields": [],
+        "mode": "clean",
+        "pathAuthority": "none",
+        "sourcePolicyID": "normal",
+    }
+    allow = {
+        **normal_clean,
+        "allowedPathRules": [{"kind": "exactFile", "path": "README.md"}],
+        "mode": "taskOwnedSnapshot",
+        "pathAuthority": "definitionAllowlist",
+    }
+    require(source_allowed(normal_clean, clean, {}), "clean source combination")
+    require(not source_allowed(normal_clean, dirty, {}), "dirty clean-policy combination")
+    require(source_allowed(allow, clean, {}), "zero-write taskOwnedSnapshot")
+    require(source_allowed(allow, dirty, {}), "dirty allowlist combination")
+    require(aggregate_outcome(["passed", "passed"]) == "passed", "passed aggregation")
+    require(aggregate_outcome(["passed", "unknown"]) == "unknown", "unknown aggregation")
+    require(aggregate_outcome(["unknown", "failed"]) == "failed", "failed aggregation")
+    return {"outcome": "passed", "schemaVersion": 1, "tests": 14}
+
+
+def dispatch(target: str, variable_values: Sequence[str]) -> int:
+    variables = parse_make_variables(variable_values)
+    expected_output = next(
+        (row[2] for row in EVIDENCE.EXPECTED_GATE_ROWS.values() if row[0] == target),
+        None,
+    )
+    require(expected_output is not None, f"unknown target: {target}")
+    output_path = ROOT / expected_output
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = output_path.parent / ".implementation-gate.lock"
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if output_path.exists():
+            require(output_path.is_file() and not output_path.is_symlink(), "old gate projection node")
+            output_path.unlink()
+        EVIDENCE.validate_gate_contract()
+        definition = EVIDENCE.load_canonical(ROOT / EVIDENCE.GATES_ROOT)
+        gate = gate_for_target(definition, target)
+        policy = selected_policy(gate, variables)
+        require(set(variables) <= allowed_variables(gate, policy), "extra make variable set")
+        identities, slots, checks = effective_contract(gate, policy)
+        before = EVIDENCE.source_snapshot()
+        input_results: List[Dict[str, Any]] = []
+        resolved_inputs: Dict[str, Mapping[str, Any]] = {}
+        for slot in slots:
+            result, value = resolve_slot(slot, variables)
+            input_results.append(result)
+            if value is not None:
+                resolved_inputs[slot["inputRole"]] = value
+        source_ok = source_allowed(policy, before, resolved_inputs)
+        check_results = [run_checker(check, resolved_inputs, before) for check in checks]
+        after = EVIDENCE.source_snapshot()
+        require(before == after, "checker modified repository source")
+        if not source_ok:
+            check_result_value = {
+                "checkID": "repository.source-policy",
+                "checkerID": "repository.source-policy",
+                "outcome": "failed",
+                "reasonCodes": ["source.policy-mismatch"],
+                "schemaVersion": 1,
+            }
+            check_results.append(
+                {
+                    "checkID": "repository.source-policy",
+                    "checkerID": "repository.source-policy",
+                    "outcome": "failed",
+                    "resultSHA256": EVIDENCE.sha256_bytes(
+                        EVIDENCE.canonical_bytes(check_result_value)
+                    ),
+                    "resultSchemaRef": (
+                        "Schemas/implementation/implementation-gate-report.v1.schema.json"
+                        "#/$defs/checkResult"
+                    ),
+                }
+            )
+            check_results.sort(key=lambda item: item["checkID"])
+        outcomes = [item["resolutionOutcome"] for item in input_results] + [
+            item["outcome"] for item in check_results
+        ]
+        overall = aggregate_outcome(outcomes)
+        contract = EVIDENCE.gate_identity()
+        report = {
+            "checkResults": check_results,
+            "gateContract": {
+                "hash": contract["hash"],
+                "revision": contract["revision"],
+            },
+            "gateID": gate["gateID"],
+            "inputResults": input_results,
+            "makeTarget": gate["makeTarget"],
+            "outputRelativePath": gate["outputRelativePath"],
+            "overallOutcome": overall,
+            "ownerTaskID": gate["ownerTaskID"],
+            "schemaVersion": 1,
+            "sourcePolicyID": policy["sourcePolicyID"],
+            "sourceSnapshot": before,
+            "sourceSnapshotHash": EVIDENCE.source_snapshot_hash(before),
+            **project_identities(identities, resolved_inputs),
+        }
+        EVIDENCE.write_canonical_atomic(output_path, report)
+        EVIDENCE.print_json(
+            {
+                "gateID": gate["gateID"],
+                "outcome": overall,
+                "outputRelativePath": gate["outputRelativePath"],
+                "reportHash": EVIDENCE.domain_hash(
+                    "pulsephone.implementation-gate-report.v1", report
+                ),
+                "schemaVersion": 1,
+            }
+        )
+        return 0 if overall == "passed" else 1
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="implementation-gate")
+    parser.add_argument("--target")
+    parser.add_argument("--make-variable", action="append", default=[])
+    parser.add_argument("--self-test", action="store_true")
+    arguments = parser.parse_args(argv)
+    try:
+        if arguments.self_test:
+            require(arguments.target is None and not arguments.make_variable, "self-test arguments")
+            EVIDENCE.print_json(self_test())
+            return 0
+        require(arguments.target is not None, "--target is required")
+        return dispatch(arguments.target, arguments.make_variable)
+    except (
+        EVIDENCE.ContractError,
+        EVIDENCE.CanonicalJSONError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as error:
+        print(f"implementation-gate: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

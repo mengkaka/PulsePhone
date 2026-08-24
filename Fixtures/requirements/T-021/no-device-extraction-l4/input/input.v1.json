@@ -1,0 +1,1 @@
+{"allowedDeviceOperations":["queryMountedMetadata"],"forbiddenDeviceOperations":["extractBuildManifest","extractDeveloperImage","extractTrustCache","automaticUnmount"]}

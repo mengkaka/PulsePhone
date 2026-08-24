@@ -1,0 +1,1 @@
+{"canonicalUDID":"00008020-001C2D3E4F50002E","deniedFieldKeys":["canonicalUDID","coordinates","deviceName","ecid","hidUsage","keyboardFrame","pairingRecord","pressedSet","rawUDID","serial","text","userText"],"gapRuleID":"videoReconnectMs.p95","notApplicableRuleID":"touchDeliveryLatencyMs.p95","targetHashDomain":"pulsephone.udid.v1"}

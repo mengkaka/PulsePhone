@@ -1,0 +1,1 @@
+{"$id":"productVersionResult.v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"build":{"maxLength":128,"minLength":1,"type":"string"},"version":{"maxLength":128,"minLength":1,"type":"string"}},"required":["build","version"],"type":"object","x-pulsephone-maxEncodedBytes":512}

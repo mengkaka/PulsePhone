@@ -1,0 +1,1 @@
+{"connectionEpoch":15,"failedExecutorGeneration":5,"framingFaults":["missingNewline","invalidJSON","unsupportedMessage","wrongDirection"],"healthyExecutorGeneration":6,"runtimeEpoch":7}

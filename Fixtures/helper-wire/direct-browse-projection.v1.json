@@ -1,0 +1,101 @@
+{
+  "cases": [
+    {
+      "expectedResult": {
+        "apps": [
+          {
+            "applicationType": "system",
+            "bundleID": "com.example.alpha",
+            "displayName": "Alpha",
+            "version": "1.0"
+          },
+          {
+            "applicationType": "user",
+            "bundleID": "com.example.beta",
+            "displayName": "Beta Fallback"
+          },
+          {
+            "applicationType": "user",
+            "bundleID": "com.example.zeta",
+            "displayName": "Beta",
+            "version": "9.9"
+          }
+        ],
+        "truncated": false
+      },
+      "name": "normalizesFiltersAndSortsPagedBrowseResult",
+      "pages": [
+        {
+          "CurrentList": [
+            {
+              "ApplicationType": "User",
+              "CFBundleDisplayName": "Beta",
+              "CFBundleIdentifier": "com.example.zeta",
+              "CFBundlePackageType": "APPL",
+              "CFBundleShortVersionString": "9.9"
+            },
+            {
+              "CFBundleIdentifier": "com.example.hidden",
+              "CFBundlePackageType": "APPL",
+              "SBAppTags": ["hidden"]
+            },
+            {
+              "CFBundleIdentifier": "com.example.framework",
+              "CFBundlePackageType": "FMWK"
+            }
+          ],
+          "Status": "Browsing"
+        },
+        {
+          "CurrentList": [
+            {
+              "ApplicationType": "System",
+              "CFBundleDisplayName": "Alpha",
+              "CFBundleIdentifier": "com.example.alpha",
+              "CFBundlePackageType": "APPL",
+              "CFBundleShortVersionString": "1.0"
+            },
+            {
+              "ApplicationType": "User",
+              "CFBundleIdentifier": "com.example.beta",
+              "CFBundleName": "Beta Fallback",
+              "CFBundlePackageType": "APPL"
+            }
+          ],
+          "Status": "Complete"
+        }
+      ]
+    },
+    {
+      "expectedFailure": {"code": "backendFailed", "stage": "browseValidate"},
+      "name": "rejectsDuplicateBundleIDEvenWhenFirstEntryWasHidden",
+      "pages": [
+        {
+          "CurrentList": [
+            {
+              "CFBundleIdentifier": "com.example.duplicate",
+              "CFBundlePackageType": "APPL",
+              "SBAppTags": ["hidden"]
+            },
+            {
+              "CFBundleIdentifier": "com.example.duplicate",
+              "CFBundlePackageType": "APPL"
+            }
+          ],
+          "Status": "Complete"
+        }
+      ]
+    },
+    {
+      "expectedFailure": {"code": "backendFailed", "stage": "browseReceive"},
+      "name": "backendErrorProjectsBrowseReceive",
+      "pages": [{"Error": "InstallationProxyRejected"}]
+    },
+    {
+      "expectedFailure": {"code": "backendFailed", "stage": "browseValidate"},
+      "name": "missingCurrentListBeforeCompletionIsRejected",
+      "pages": [{"Status": "Browsing"}]
+    }
+  ],
+  "schemaVersion": 1
+}

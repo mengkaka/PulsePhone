@@ -1,0 +1,1 @@
+{"active":[{"access":"shared","resourceID":"resource.r"}],"laterDisjointResourceID":"resource.s","pendingOneShotAttempts":65,"waiters":[{"access":"exclusive","resourceID":"resource.r"},{"access":"shared","resourceID":"resource.r"}]}

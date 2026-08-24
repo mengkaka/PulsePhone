@@ -1,0 +1,1 @@
+{"events":["acceptedPrepareCapabilities","prepareProgress","prepareCompletion"],"idleThresholdSeconds":600,"inhibitors":["assetAcquisition","preparingCapability"]}

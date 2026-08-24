@@ -1,0 +1,1222 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+import uuid
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
+
+
+ROOT = Path(__file__).resolve().parents[1]
+TOOLING = ROOT / "Scripts/lib"
+if str(TOOLING) not in sys.path:
+    sys.path.insert(0, str(TOOLING))
+
+from pulsephone_contracts.canonical_json.engine import (  # noqa: E402
+    encode_document,
+    validate_document,
+)
+
+
+CONTRACT_DOMAIN = "pulsephone.performance-contract-artifact-set.v1"
+MEASUREMENT_DOMAIN = "pulsephone.performance-measurement-profile.v1"
+THRESHOLD_PROFILE_DOMAIN = "pulsephone.performance-threshold-profile.v1"
+CANDIDATE_INPUT_DOMAIN = b"pulsephone.release-candidate-input.v1\0"
+COLLECTION_OUTPUT_DOMAIN = b"pulsephone.performance-collection-output.v1\0"
+TARGET_UDID_DOMAIN = b"pulsephone.udid.v1\0"
+MAX_DOCUMENT_BYTES = 64 * 1024 * 1024
+REGISTRY_PATH = "Registries/performance-metrics.v1.json"
+ARTIFACT_PATHS = [
+    REGISTRY_PATH,
+    "Schemas/evidence/performance-evaluation.v1.schema.json",
+    "Schemas/evidence/performance-measurement-profile.v1.schema.json",
+    "Schemas/evidence/performance-threshold-approval.v1.schema.json",
+    "Schemas/evidence/performance-threshold-decision.v1.schema.json",
+    "Schemas/evidence/performance-threshold-profile.v1.schema.json",
+    "Schemas/evidence/pulsephone.metrics.v1.schema.json",
+]
+EXPECTED_REVISION = "performance-metrics.v1-20260720"
+DENIED_KEYS = {
+    "canonicalUDID",
+    "coordinates",
+    "deviceName",
+    "ecid",
+    "hidUsage",
+    "keyboardFrame",
+    "pairingRecord",
+    "pressedSet",
+    "rawUDID",
+    "serial",
+    "text",
+    "userText",
+}
+
+
+class PerformanceError(ValueError):
+    pass
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise PerformanceError(message)
+
+
+def canonical_bytes(value: Mapping[str, Any]) -> bytes:
+    return encode_document(value)
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def domain_hash(domain: str, value: Mapping[str, Any]) -> str:
+    return sha256_bytes(domain.encode("ascii") + b"\0" + canonical_bytes(value))
+
+
+def regular_bytes(path: Path) -> bytes:
+    metadata = path.lstat()
+    require(stat.S_ISREG(metadata.st_mode), f"unsafe node: {path}")
+    require(metadata.st_nlink == 1, f"hardlinked node: {path}")
+    data = path.read_bytes()
+    require(len(data) <= MAX_DOCUMENT_BYTES, f"document cap: {path}")
+    return data
+
+
+def load_canonical(path: Path) -> Dict[str, Any]:
+    data = regular_bytes(path)
+    document = validate_document(data, MAX_DOCUMENT_BYTES)
+    require(isinstance(document.root, dict), f"object required: {path}")
+    return dict(document.root)
+
+
+def write_canonical(path: Path, value: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(file_descriptor, 0o600)
+        with os.fdopen(file_descriptor, "wb", closefd=True) as stream:
+            stream.write(canonical_bytes(value))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def canonical_udid(value: str) -> str:
+    normalized = value.strip().upper()
+    encoded = normalized.encode("ascii")
+    require(1 <= len(encoded) <= 128, "target UDID")
+    require(
+        all(character in b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-" for character in encoded),
+        "target UDID",
+    )
+    return normalized
+
+
+def target_udid_hash(value: str) -> str:
+    return sha256_bytes(TARGET_UDID_DOMAIN + canonical_udid(value).encode("ascii"))
+
+
+def verified_objects_root(path: Path) -> Path:
+    require(not path.is_symlink(), "objects root symlink")
+    resolved = path.resolve()
+    allowed = (ROOT / "build" / "evidence").resolve()
+    require(resolved == allowed or allowed in resolved.parents, "objects root ownership")
+    resolved.mkdir(parents=True, exist_ok=True, mode=0o700)
+    metadata = resolved.stat()
+    require(stat.S_ISDIR(metadata.st_mode), "objects root directory")
+    require(metadata.st_uid == os.geteuid(), "objects root owner")
+    return resolved
+
+
+def relative_tree_entries(root: Path) -> Dict[str, Dict[str, Any]]:
+    require(root.is_absolute(), "candidate app absolute path")
+    require(not root.is_symlink(), "candidate app symlink")
+    root_metadata = root.lstat()
+    require(stat.S_ISDIR(root_metadata.st_mode), "candidate app directory")
+    require(root_metadata.st_uid == os.geteuid(), "candidate app owner")
+    entries: Dict[str, Dict[str, Any]] = {}
+    stack = [root]
+    while stack:
+        directory = stack.pop()
+        children = sorted(directory.iterdir(), key=lambda item: item.name.encode("utf-8"))
+        for child in children:
+            relative = child.relative_to(root).as_posix()
+            metadata = child.lstat()
+            mode = stat.S_IMODE(metadata.st_mode)
+            if stat.S_ISDIR(metadata.st_mode):
+                entries[relative + "/"] = {"mode": mode, "nodeType": "directory"}
+                stack.append(child)
+            elif stat.S_ISREG(metadata.st_mode):
+                require(metadata.st_uid == os.geteuid(), f"candidate file owner: {relative}")
+                require(metadata.st_nlink == 1, f"candidate hardlink: {relative}")
+                data = child.read_bytes()
+                entries[relative] = {
+                    "byteLength": len(data),
+                    "mode": mode,
+                    "nodeType": "file",
+                    "sha256": sha256_bytes(data),
+                }
+            elif stat.S_ISLNK(metadata.st_mode):
+                target = os.readlink(child)
+                require(target and not os.path.isabs(target), f"candidate symlink target: {relative}")
+                entries[relative] = {
+                    "linkTarget": target,
+                    "mode": mode,
+                    "nodeType": "symlink",
+                }
+            else:
+                raise PerformanceError(f"unsafe candidate node: {relative}")
+    return entries
+
+
+def verify_candidate_app(candidate_input_path: Path, candidate_app_path: Path) -> Dict[str, Any]:
+    candidate_bytes = regular_bytes(candidate_input_path)
+    candidate_input = load_canonical(candidate_input_path)
+    require(candidate_input.get("schemaVersion") == 1, "candidate input schema")
+    require(candidate_input.get("worktreeState") == "clean", "candidate input source")
+    manifest = candidate_input.get("appBundleContentManifest")
+    require(isinstance(manifest, dict), "candidate manifest")
+    expected_rows = manifest.get("entries")
+    require(isinstance(expected_rows, list), "candidate manifest entries")
+    expected: Dict[str, Dict[str, Any]] = {}
+    for row in expected_rows:
+        require(isinstance(row, dict), "candidate manifest row")
+        relative = row.get("relativePath")
+        require(isinstance(relative, str) and relative not in expected, "candidate path")
+        expected[relative] = {key: value for key, value in row.items() if key != "relativePath"}
+    actual = relative_tree_entries(candidate_app_path)
+    require(actual == expected, "candidate app tree mismatch")
+    executable = candidate_app_path / "Contents" / "MacOS" / "PulsePhone"
+    executable_metadata = executable.lstat()
+    require(stat.S_ISREG(executable_metadata.st_mode), "candidate executable")
+    require(executable_metadata.st_mode & stat.S_IXUSR, "candidate executable mode")
+    return {
+        "candidateInput": candidate_input,
+        "candidateInputHash": sha256_bytes(CANDIDATE_INPUT_DOMAIN + candidate_bytes),
+        "executable": executable,
+    }
+
+
+def read_bounded_fd_file(path: Path, label: str) -> bytes:
+    data = regular_bytes(path)
+    require(data, f"empty {label}")
+    return data
+
+
+def run_candidate_collection_protocol(
+    executable: Path,
+    protocol_arguments: Sequence[str],
+    temporary: Path,
+    session_nonce: str,
+    candidate_input_hash: str,
+    timeout_seconds: int,
+) -> Tuple[bytes, bytes]:
+    measurement_path = temporary / "measurement.v1.json"
+    metrics_path = temporary / "metrics.v1.json"
+    receipt_path = temporary / "receipt.v1.json"
+    descriptors = []
+    try:
+        for path in (measurement_path, metrics_path, receipt_path):
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+            )
+            descriptors.append(descriptor)
+        command = [
+            str(executable),
+            "--performance-collect-v1",
+            *protocol_arguments,
+            "--performance-measurement-fd", str(descriptors[0]),
+            "--performance-metrics-fd", str(descriptors[1]),
+            "--performance-receipt-fd", str(descriptors[2]),
+            "--performance-session-nonce", session_nonce,
+            "--performance-candidate-input-hash", candidate_input_hash,
+        ]
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            pass_fds=tuple(descriptors),
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise PerformanceError("candidate collection timeout") from error
+    finally:
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    require(completed.returncode == 0, "candidate collection failed")
+    require(not completed.stdout, "candidate collection stdout")
+    require(not completed.stderr, "candidate collection stderr")
+    measurement_bytes = read_bounded_fd_file(measurement_path, "measurement")
+    metrics_bytes = read_bounded_fd_file(metrics_path, "metrics")
+    receipt = load_canonical(receipt_path)
+    require(
+        receipt == {
+            "candidateInputHash": candidate_input_hash,
+            "measurementSHA256": sha256_bytes(measurement_bytes),
+            "metricsSHA256": sha256_bytes(metrics_bytes),
+            "schemaVersion": 1,
+            "sessionNonce": session_nonce,
+        },
+        "candidate collection receipt",
+    )
+    return measurement_bytes, metrics_bytes
+
+
+def publish_collection_outputs(
+    objects_root: Path,
+    measurement_bytes: bytes,
+    metrics_bytes: bytes,
+) -> Dict[str, Any]:
+    path_key = sha256_bytes(
+        COLLECTION_OUTPUT_DOMAIN
+        + measurement_bytes
+        + b"\0"
+        + metrics_bytes
+    )
+    destination = objects_root / path_key
+    if destination.exists():
+        metadata = destination.lstat()
+        require(stat.S_ISDIR(metadata.st_mode), "collection output directory")
+        require(metadata.st_uid == os.geteuid(), "collection output owner")
+    else:
+        destination.mkdir(mode=0o700)
+    outputs = [
+        (
+            "performanceMeasurementProfile",
+            destination / "performance-measurement-profile.v1.json",
+            measurement_bytes,
+        ),
+        (
+            "performanceMetrics",
+            destination / "pulsephone.metrics.v1.json",
+            metrics_bytes,
+        ),
+    ]
+    artifacts = []
+    for role, path, data in outputs:
+        if path.exists():
+            require(regular_bytes(path) == data, f"existing collection output: {role}")
+        else:
+            document = validate_document(data, MAX_DOCUMENT_BYTES)
+            require(isinstance(document.root, dict), f"collection output object: {role}")
+            write_canonical(path, document.root)
+        artifacts.append({
+            "artifactDomain": role,
+            "path": str(path.relative_to(ROOT)),
+            "sha256": sha256_bytes(data),
+        })
+    return {
+        "artifacts": artifacts,
+        "collectionPathKey": path_key,
+        "schemaVersion": 1,
+    }
+
+
+def validate_id(value: Any, maximum: int, label: str) -> str:
+    require(isinstance(value, str), label)
+    encoded = value.encode("ascii")
+    require(1 <= len(encoded) <= maximum, label)
+    require("/" not in value and "\\" not in value and "://" not in value, label)
+    require(all(0x21 <= byte <= 0x7E for byte in encoded), label)
+    return value
+
+
+def validate_hash(value: Any, label: str) -> str:
+    require(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value),
+        label,
+    )
+    return value
+
+
+def validate_positive_uint64(value: Any, label: str) -> int:
+    require(
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 1 <= value <= 0xFFFFFFFFFFFFFFFF,
+        label,
+    )
+    return value
+
+
+def validate_video_mapping(arguments: argparse.Namespace) -> Dict[str, Any] | None:
+    names = (
+        "video_connection_epoch",
+        "video_device_os_build",
+        "video_device_product_type",
+        "video_display_refresh_rate_millihz",
+        "video_geometry_revision",
+        "video_logical_height",
+        "video_logical_width",
+        "video_mapping_proof_id",
+        "video_orientation",
+        "video_source_epoch",
+        "video_source_id",
+        "video_window_height_pixels",
+        "video_window_width_pixels",
+    )
+    provided = [getattr(arguments, name) is not None for name in names]
+    require(not any(provided) or all(provided), "video mapping arguments")
+    if not any(provided):
+        return None
+    return {
+        "connectionEpoch": validate_positive_uint64(
+            arguments.video_connection_epoch,
+            "video connection epoch",
+        ),
+        "deviceOSBuild": validate_id(
+            arguments.video_device_os_build,
+            64,
+            "video device OS build",
+        ),
+        "deviceProductType": validate_id(
+            arguments.video_device_product_type,
+            64,
+            "video device product type",
+        ),
+        "displayRefreshRateMilliHz": validate_positive_uint64(
+            arguments.video_display_refresh_rate_millihz,
+            "video display refresh rate",
+        ),
+        "geometryRevision": validate_positive_uint64(
+            arguments.video_geometry_revision,
+            "video geometry revision",
+        ),
+        "logicalHeight": validate_positive_uint64(
+            arguments.video_logical_height,
+            "video logical height",
+        ),
+        "logicalWidth": validate_positive_uint64(
+            arguments.video_logical_width,
+            "video logical width",
+        ),
+        "mappingProofID": validate_id(
+            arguments.video_mapping_proof_id,
+            128,
+            "video mapping proof ID",
+        ),
+        "orientation": arguments.video_orientation,
+        "sourceEpoch": validate_positive_uint64(
+            arguments.video_source_epoch,
+            "video source epoch",
+        ),
+        "sourceID": validate_hash(arguments.video_source_id, "video source ID"),
+        "windowHeightPixels": validate_positive_uint64(
+            arguments.video_window_height_pixels,
+            "video window height",
+        ),
+        "windowWidthPixels": validate_positive_uint64(
+            arguments.video_window_width_pixels,
+            "video window width",
+        ),
+    }
+
+
+def video_mapping_protocol_arguments(mapping: Dict[str, Any]) -> List[str]:
+    return [
+        "--video-connection-epoch", str(mapping["connectionEpoch"]),
+        "--video-device-os-build", mapping["deviceOSBuild"],
+        "--video-device-product-type", mapping["deviceProductType"],
+        "--video-display-refresh-rate-millihz", str(mapping["displayRefreshRateMilliHz"]),
+        "--video-geometry-revision", str(mapping["geometryRevision"]),
+        "--video-logical-height", str(mapping["logicalHeight"]),
+        "--video-logical-width", str(mapping["logicalWidth"]),
+        "--video-mapping-proof-id", mapping["mappingProofID"],
+        "--video-orientation", mapping["orientation"],
+        "--video-source-epoch", str(mapping["sourceEpoch"]),
+        "--video-source-id", mapping["sourceID"],
+        "--video-window-height-pixels", str(mapping["windowHeightPixels"]),
+        "--video-window-width-pixels", str(mapping["windowWidthPixels"]),
+    ]
+
+
+def sorted_unique(values: Sequence[str], label: str) -> None:
+    require(
+        list(values) == sorted(set(values), key=lambda item: item.encode("ascii")),
+        label,
+    )
+
+
+def validate_epoch_lineage(value: Any, label: str) -> List[int]:
+    require(isinstance(value, list), label)
+    previous = 0
+    result: List[int] = []
+    for epoch in value:
+        require(type(epoch) is int and epoch > previous, label)
+        result.append(epoch)
+        previous = epoch
+    return result
+
+
+def artifact_set() -> Dict[str, Any]:
+    entries = []
+    for relative_path in ARTIFACT_PATHS:
+        data = regular_bytes(ROOT / relative_path)
+        load_canonical(ROOT / relative_path)
+        entries.append(
+            {"relativePath": relative_path, "sha256": sha256_bytes(data)}
+        )
+    return {
+        "entries": entries,
+        "revision": EXPECTED_REVISION,
+        "schemaVersion": 1,
+        "setID": "performanceContract",
+    }
+
+
+def contract_identity() -> Dict[str, Any]:
+    validate_registry()
+    projection = artifact_set()
+    return {
+        "artifactSet": projection,
+        "revision": EXPECTED_REVISION,
+        "schemaVersion": 1,
+        "sha256": domain_hash(CONTRACT_DOMAIN, projection),
+    }
+
+
+def validate_registry() -> Dict[str, Dict[str, Any]]:
+    root = load_canonical(ROOT / REGISTRY_PATH)
+    require(set(root) == {"metrics", "revision", "schemaVersion"}, "registry keys")
+    require(root["schemaVersion"] == 1, "registry schema version")
+    require(root["revision"] == EXPECTED_REVISION, "registry revision")
+    rows = root["metrics"]
+    require(isinstance(rows, list) and len(rows) == 8, "registry metric count")
+    by_metric: Dict[str, Dict[str, Any]] = {}
+    all_rules: List[str] = []
+    expected_keys = {
+        "allowedStatisticIDs",
+        "applicabilityRuleID",
+        "canonicalUnitID",
+        "collectorContractVersion",
+        "comparator",
+        "evaluatorContractVersion",
+        "metricID",
+        "requiredRuleIDs",
+    }
+    for row in rows:
+        require(isinstance(row, dict) and set(row) == expected_keys, "metric row")
+        metric_id = validate_id(row["metricID"], 128, "metric ID")
+        require(metric_id not in by_metric, "duplicate metric")
+        statistics = row["allowedStatisticIDs"]
+        rules = row["requiredRuleIDs"]
+        require(
+            isinstance(statistics, list)
+            and all(isinstance(item, str) for item in statistics),
+            "statistics",
+        )
+        require(
+            isinstance(rules, list) and all(isinstance(item, str) for item in rules),
+            "rules",
+        )
+        sorted_unique(statistics, "statistic order")
+        sorted_unique(rules, "rule order")
+        require(statistics and rules, "empty metric contract")
+        for rule_id in rules:
+            prefix = metric_id + "."
+            require(rule_id.startswith(prefix), "rule metric prefix")
+            require(rule_id[len(prefix) :] in statistics, "rule statistic")
+        require(
+            row["comparator"] in {"greaterThanOrEqual", "lessThanOrEqual"},
+            "comparator",
+        )
+        validate_id(row["canonicalUnitID"], 128, "unit")
+        validate_id(row["applicabilityRuleID"], 128, "applicability rule")
+        require(row["collectorContractVersion"] == "performance-collector.v1", "collector version")
+        require(row["evaluatorContractVersion"] == "performance-evaluator.v1", "evaluator version")
+        by_metric[metric_id] = row
+        all_rules.extend(rules)
+    sorted_unique(list(by_metric), "metric order")
+    sorted_unique(sorted(all_rules, key=lambda item: item.encode("ascii")), "global rules")
+    return by_metric
+
+
+def measurement_identity(path: Path) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    profile = load_canonical(path)
+    required = {
+        "buildConfiguration",
+        "capture",
+        "device",
+        "evidenceEnvironmentProfileHash",
+        "evidenceEnvironmentProfileID",
+        "host",
+        "processSetProfileID",
+        "profileID",
+        "schemaVersion",
+    }
+    optional = {"reconnectReadinessProfileHash", "reconnectReadinessProfileID"}
+    require(required <= set(profile) <= required | optional, "measurement keys")
+    require(profile["schemaVersion"] == 1, "measurement schema version")
+    require(profile["buildConfiguration"] == "release", "measurement build")
+    require(profile["processSetProfileID"] == "single-live.v1", "process set")
+    profile_id = validate_id(profile["profileID"], 128, "measurement profile ID")
+    validate_hash(profile["evidenceEnvironmentProfileHash"], "environment hash")
+    require(
+        ("reconnectReadinessProfileID" in profile)
+        == ("reconnectReadinessProfileHash" in profile),
+        "reconnect profile pair",
+    )
+    return profile, {
+        "profileID": profile_id,
+        "profileHash": domain_hash(MEASUREMENT_DOMAIN, profile),
+    }
+
+
+def reject_private_keys(value: Any) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            require(key not in DENIED_KEYS, f"private key: {key}")
+            reject_private_keys(child)
+    elif isinstance(value, list):
+        for child in value:
+            reject_private_keys(child)
+
+
+def registry_rules(
+    registry: Mapping[str, Mapping[str, Any]]
+) -> List[Tuple[str, Mapping[str, Any], str]]:
+    result = []
+    for metric_id, row in registry.items():
+        for rule_id in row["requiredRuleIDs"]:
+            result.append((rule_id, row, rule_id[len(metric_id) + 1 :]))
+    return sorted(result, key=lambda item: item[0].encode("ascii"))
+
+
+def validate_metrics(
+    metrics_path: Path,
+    measurement_path: Path,
+    threshold_profile_path: Path | None = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, str]]:
+    registry = validate_registry()
+    metrics = load_canonical(metrics_path)
+    reject_private_keys(metrics)
+    profile, measurement = measurement_identity(measurement_path)
+    identity = contract_identity()
+    require(metrics.get("schemaVersion") == 1, "metrics schema version")
+    require(metrics.get("metricsEnabled") is True, "metrics enabled")
+    require(metrics.get("buildConfiguration") == "release", "metrics build")
+    require(metrics.get("bucketMs") == 1000, "metrics bucket")
+    require(metrics.get("warmupMs") == 10000, "metrics warmup")
+    require(metrics.get("architecture") == "arm64", "metrics architecture")
+    require(metrics.get("deviceClass") == "iPhone", "metrics device class")
+    validate_hash(metrics.get("targetUDIDHash"), "target UDID hash")
+    require(
+        metrics.get("performanceContract")
+        == {"revision": identity["revision"], "sha256": identity["sha256"]},
+        "metrics performance contract",
+    )
+    require(metrics.get("measurementProfileID") == measurement["profileID"], "measurement ID")
+    require(metrics.get("measurementProfileHash") == measurement["profileHash"], "measurement hash")
+    mode = metrics.get("evaluationMode")
+    require(mode in {"baseline", "threshold"}, "evaluation mode")
+    threshold_fields = {
+        "thresholdProfileID",
+        "thresholdProfileHash",
+        "thresholdSetID",
+    }
+    if mode == "baseline":
+        require(not (threshold_fields & set(metrics)), "baseline threshold fields")
+        require(threshold_profile_path is None, "baseline threshold profile input")
+    else:
+        require(threshold_fields <= set(metrics), "threshold fields")
+        require(threshold_profile_path is not None, "threshold profile required")
+        threshold = load_canonical(threshold_profile_path)
+        require(metrics["thresholdProfileID"] == threshold.get("profileID"), "threshold profile ID")
+        require(
+            metrics["thresholdProfileHash"]
+            == domain_hash(THRESHOLD_PROFILE_DOMAIN, threshold),
+            "threshold profile hash",
+        )
+    gate_values = metrics.get("gateValues")
+    require(isinstance(gate_values, list), "gate values")
+    rules = registry_rules(registry)
+    require(
+        [item.get("ruleID") for item in gate_values] == [item[0] for item in rules],
+        "gate value rule set/order",
+    )
+    for gate, (rule_id, metric, statistic_id) in zip(gate_values, rules):
+        require(isinstance(gate, dict), "gate row")
+        require(gate.get("metricID") == metric["metricID"], "gate metric")
+        require(gate.get("statisticID") == statistic_id, "gate statistic")
+        require(gate.get("canonicalUnitID") == metric["canonicalUnitID"], "gate unit")
+        applicability = gate.get("applicability")
+        quality = gate.get("dataQuality")
+        sample_count = gate.get("sampleCount")
+        require(
+            isinstance(sample_count, int)
+            and not isinstance(sample_count, bool)
+            and sample_count >= 0,
+            "sample count",
+        )
+        if applicability == "applicable" and quality == "complete":
+            require(isinstance(gate.get("observedScaledValue"), int), "observed value")
+            require(sample_count > 0, "complete sample count")
+            require("notApplicableReasonCode" not in gate and "unknownReasonCode" not in gate, "complete reasons")
+        elif applicability == "applicable" and quality in {"gap", "notRecovered"}:
+            require("observedScaledValue" not in gate and sample_count == 0, "gap value")
+            validate_id(gate.get("unknownReasonCode"), 128, "unknown reason")
+            require("notApplicableReasonCode" not in gate, "gap N/A reason")
+        elif applicability == "notApplicable" and quality == "complete":
+            require("observedScaledValue" not in gate and sample_count == 0, "N/A value")
+            validate_id(gate.get("notApplicableReasonCode"), 128, "N/A reason")
+            require("unknownReasonCode" not in gate, "N/A unknown reason")
+        else:
+            raise PerformanceError(f"invalid gate state: {rule_id}")
+    return metrics, registry, profile, measurement
+
+
+def collect(arguments: argparse.Namespace) -> Dict[str, Any]:
+    video_mapping = validate_video_mapping(arguments)
+    candidate_input_path = Path(arguments.candidate_input).resolve()
+    if arguments.candidate_app:
+        candidate_app_path = Path(arguments.candidate_app).resolve()
+    else:
+        candidate_app_path = (ROOT / "build" / "staging" / "PulsePhone.app").resolve()
+    verified_candidate = verify_candidate_app(candidate_input_path, candidate_app_path)
+    candidate_input = verified_candidate["candidateInput"]
+    candidate = candidate_input.get("candidate")
+    require(isinstance(candidate, dict), "candidate identity")
+
+    minimum_duration_ms = arguments.minimum_duration_ms
+    reconnect_count = arguments.required_reconnect_count
+    require(
+        isinstance(minimum_duration_ms, int)
+        and 1_000 <= minimum_duration_ms <= 43_200_000,
+        "collection duration",
+    )
+    require(
+        isinstance(reconnect_count, int) and 0 <= reconnect_count <= 1_000,
+        "collection reconnect count",
+    )
+    target = canonical_udid(arguments.target_udid)
+    validate_id(arguments.measurement_profile_id, 128, "measurement profile ID")
+    validate_id(arguments.evidence_environment_profile_id, 128, "environment profile ID")
+    validate_hash(arguments.evidence_environment_profile_hash, "environment profile hash")
+    validate_id(arguments.reconnect_profile_id, 128, "reconnect profile ID")
+    validate_hash(arguments.reconnect_profile_hash, "reconnect profile hash")
+    require(arguments.evaluation_mode in {"baseline", "threshold"}, "evaluation mode")
+
+    threshold_profile_path: Path | None = None
+    if arguments.evaluation_mode == "threshold":
+        require(arguments.threshold_profile is not None, "threshold profile required")
+        require(arguments.threshold_set is not None, "threshold set required")
+        threshold_profile_path = Path(arguments.threshold_profile).resolve()
+        threshold = load_canonical(threshold_profile_path)
+        validate_id(arguments.threshold_set, 128, "threshold set")
+        sets = threshold.get("thresholdSets")
+        require(
+            isinstance(sets, list)
+            and sum(item.get("thresholdSetID") == arguments.threshold_set for item in sets) == 1,
+            "threshold set selection",
+        )
+    else:
+        require(arguments.threshold_profile is None, "baseline threshold profile")
+        require(arguments.threshold_set is None, "baseline threshold set")
+
+    protocol_arguments = [
+        "--target-udid", target,
+        "--minimum-duration-ms", str(minimum_duration_ms),
+        "--required-reconnect-count", str(reconnect_count),
+        "--evaluation-mode", arguments.evaluation_mode,
+        "--measurement-profile-id", arguments.measurement_profile_id,
+        "--evidence-environment-profile-id", arguments.evidence_environment_profile_id,
+        "--evidence-environment-profile-hash", arguments.evidence_environment_profile_hash,
+        "--reconnect-readiness-profile-id", arguments.reconnect_profile_id,
+        "--reconnect-readiness-profile-hash", arguments.reconnect_profile_hash,
+    ]
+    if threshold_profile_path is not None:
+        protocol_arguments.extend([
+            "--threshold-profile", str(threshold_profile_path),
+            "--threshold-set", arguments.threshold_set,
+        ])
+    if video_mapping is not None:
+        protocol_arguments.extend(video_mapping_protocol_arguments(video_mapping))
+
+    objects_root = verified_objects_root(Path(arguments.objects_root))
+    temporary = Path(tempfile.mkdtemp(prefix=".performance-collect.", dir=objects_root))
+    try:
+        session_nonce = uuid.uuid4().hex
+        timeout_seconds = (minimum_duration_ms + 999) // 1_000 + 1_200
+        measurement_bytes, metrics_bytes = run_candidate_collection_protocol(
+            verified_candidate["executable"],
+            protocol_arguments,
+            temporary,
+            session_nonce,
+            verified_candidate["candidateInputHash"],
+            timeout_seconds,
+        )
+        measurement_path = temporary / "measurement.v1.json"
+        metrics_path = temporary / "metrics.v1.json"
+        metrics, _, measurement, _ = validate_metrics(
+            metrics_path,
+            measurement_path,
+            threshold_profile_path,
+        )
+        require(measurement["profileID"] == arguments.measurement_profile_id, "measurement profile ID")
+        require(
+            measurement["evidenceEnvironmentProfileID"]
+            == arguments.evidence_environment_profile_id,
+            "measurement environment ID",
+        )
+        require(
+            measurement["evidenceEnvironmentProfileHash"]
+            == arguments.evidence_environment_profile_hash,
+            "measurement environment hash",
+        )
+        require(
+            measurement.get("reconnectReadinessProfileID") == arguments.reconnect_profile_id
+            and measurement.get("reconnectReadinessProfileHash") == arguments.reconnect_profile_hash,
+            "measurement reconnect profile",
+        )
+        require(metrics["targetUDIDHash"] == target_udid_hash(target), "metrics target")
+        require(metrics["monotonicDurationMs"] >= minimum_duration_ms, "metrics duration")
+        require(metrics["stability"]["durationMs"] == metrics["monotonicDurationMs"], "stability duration")
+        require(len(metrics["reconnects"]) == reconnect_count, "metrics reconnect count")
+        attempt_ids = [item.get("attemptID") for item in metrics["reconnects"]]
+        require(len(attempt_ids) == len(set(attempt_ids)), "reconnect attempt IDs")
+        require(metrics["appBuild"] == candidate.get("buildID"), "metrics candidate build")
+        require(metrics["evaluationMode"] == arguments.evaluation_mode, "metrics mode")
+        if video_mapping is not None:
+            connection_epochs = validate_epoch_lineage(
+                metrics.get("connectionEpochs"),
+                "video connection epoch lineage",
+            )
+            source_epochs = validate_epoch_lineage(
+                metrics.get("sourceEpochs"),
+                "video source epoch lineage",
+            )
+            control_recovered = sum(
+                item.get("control", {}).get("outcome") == "recovered"
+                for item in metrics["reconnects"]
+            )
+            video_recovered = sum(
+                item.get("video", {}).get("outcome") == "recovered"
+                for item in metrics["reconnects"]
+            )
+            require(
+                control_recovered <= max(0, len(connection_epochs) - 1),
+                "control reconnect epoch lineage",
+            )
+            require(
+                video_recovered <= max(0, len(source_epochs) - 1),
+                "video reconnect epoch lineage",
+            )
+            if source_epochs:
+                require(connection_epochs, "bound video connection epoch lineage")
+                require(
+                    measurement["device"]
+                    == {
+                        "deviceClass": "iPhone",
+                        "osBuild": video_mapping["deviceOSBuild"],
+                        "productType": video_mapping["deviceProductType"],
+                    },
+                    "video measurement device",
+                )
+                require(
+                    measurement["capture"]["windowHeightPixels"]
+                    == video_mapping["windowHeightPixels"]
+                    and measurement["capture"]["windowWidthPixels"]
+                    == video_mapping["windowWidthPixels"],
+                    "video measurement window",
+                )
+                require(
+                    metrics["displayRefreshRateMilliHz"]
+                    == video_mapping["displayRefreshRateMilliHz"]
+                    and metrics["windowHeightPixels"]
+                    == video_mapping["windowHeightPixels"]
+                    and metrics["windowWidthPixels"]
+                    == video_mapping["windowWidthPixels"],
+                    "video metrics display",
+                )
+            else:
+                require(
+                    measurement["device"]
+                    == {
+                        "deviceClass": "iPhone",
+                        "osBuild": "unknown",
+                        "productType": "unknown",
+                    },
+                    "unbound video device",
+                )
+                require(
+                    any(
+                        item.get("reasonCode") == "sourceUnbound"
+                        for item in metrics.get("excludedSegments", [])
+                    ),
+                    "unbound video segment",
+                )
+        if arguments.evaluation_mode == "threshold":
+            threshold = load_canonical(threshold_profile_path)
+            require(metrics["thresholdProfileID"] == threshold.get("profileID"), "metrics threshold ID")
+            require(metrics["thresholdSetID"] == arguments.threshold_set, "metrics threshold set")
+        result = publish_collection_outputs(objects_root, measurement_bytes, metrics_bytes)
+        result["candidateInputHash"] = verified_candidate["candidateInputHash"]
+        result["metricsSessionID"] = metrics["metricsSessionID"]
+        result["targetUDIDHash"] = metrics["targetUDIDHash"]
+        return result
+    finally:
+        for child in temporary.iterdir():
+            child.unlink()
+        temporary.rmdir()
+
+
+def compare(observed: int, limit: int, comparator: str) -> bool:
+    if comparator == "lessThanOrEqual":
+        return observed <= limit
+    if comparator == "greaterThanOrEqual":
+        return observed >= limit
+    raise PerformanceError("unknown comparator")
+
+
+def evaluate(
+    metrics_path: Path,
+    threshold_profile_path: Path,
+    threshold_set_id: str,
+    evaluation_id: str,
+) -> Dict[str, Any]:
+    threshold = load_canonical(threshold_profile_path)
+    threshold_hash = domain_hash(THRESHOLD_PROFILE_DOMAIN, threshold)
+    sets = threshold.get("thresholdSets")
+    require(isinstance(sets, list), "threshold sets")
+    matching = [item for item in sets if item.get("thresholdSetID") == threshold_set_id]
+    require(len(matching) == 1, "threshold set selection")
+    threshold_set = matching[0]
+    measurement = threshold_set.get("measurementProfile")
+    require(isinstance(measurement, dict), "embedded measurement profile")
+    measurement_path_data = canonical_bytes(measurement)
+    embedded_hash = sha256_bytes(
+        MEASUREMENT_DOMAIN.encode("ascii") + b"\0" + measurement_path_data
+    )
+    require(embedded_hash == threshold_set.get("measurementProfileHash"), "embedded measurement hash")
+
+    temporary = Path(tempfile.mkdtemp(prefix="pulsephone-performance-"))
+    measurement_path = temporary / "measurement.v1.json"
+    try:
+        write_canonical(measurement_path, measurement)
+        metrics, registry, _, measurement_identity_value = validate_metrics(
+            metrics_path,
+            measurement_path,
+            threshold_profile_path,
+        )
+    finally:
+        if measurement_path.exists():
+            measurement_path.unlink()
+        temporary.rmdir()
+
+    require(metrics.get("thresholdSetID") == threshold_set_id, "metrics threshold set")
+    rules = threshold_set.get("rules")
+    require(isinstance(rules, list), "threshold rules")
+    expected_rules = registry_rules(registry)
+    require(
+        [item.get("ruleID") for item in rules] == [item[0] for item in expected_rules],
+        "threshold rule set/order",
+    )
+    gates = {item["ruleID"]: item for item in metrics["gateValues"]}
+    results = []
+    outcomes = []
+    for rule, (rule_id, metric, statistic_id) in zip(rules, expected_rules):
+        gate = gates[rule_id]
+        require(rule.get("metricID") == metric["metricID"], "threshold metric")
+        require(rule.get("statisticID") == statistic_id, "threshold statistic")
+        require(rule.get("requirementID") == "T-018/performance-threshold-evaluation-l5", "threshold requirement")
+        result = {
+            "applicability": rule.get("applicability"),
+            "canonicalUnitID": metric["canonicalUnitID"],
+            "metricID": metric["metricID"],
+            "ruleID": rule_id,
+            "statisticID": statistic_id,
+        }
+        if gate["applicability"] != rule.get("applicability"):
+            outcome = "unknown"
+            result["reasonCode"] = "applicabilityMismatch"
+        elif rule.get("applicability") == "notApplicable":
+            if gate.get("notApplicableReasonCode") == rule.get("notApplicableReasonCode"):
+                outcome = "passed"
+            else:
+                outcome = "unknown"
+                result["reasonCode"] = "notApplicableAuthorityMismatch"
+        elif gate["dataQuality"] != "complete":
+            outcome = "unknown"
+            result["reasonCode"] = gate.get("unknownReasonCode", "metricsGap")
+        else:
+            comparator = rule.get("comparator")
+            unit = rule.get("canonicalUnitID")
+            limit = rule.get("limitScaledValue")
+            observed = gate.get("observedScaledValue")
+            if (
+                comparator != metric["comparator"]
+                or unit != metric["canonicalUnitID"]
+                or not isinstance(limit, int)
+                or not isinstance(observed, int)
+            ):
+                outcome = "unknown"
+                result["reasonCode"] = "thresholdContractMismatch"
+            else:
+                result["comparator"] = comparator
+                result["limitScaledValue"] = limit
+                result["observedScaledValue"] = observed
+                outcome = "passed" if compare(observed, limit, comparator) else "failed"
+                if outcome == "failed":
+                    result["reasonCode"] = "thresholdExceeded"
+        result["outcome"] = outcome
+        results.append(result)
+        outcomes.append(outcome)
+    overall = "failed" if "failed" in outcomes else "unknown" if "unknown" in outcomes else "passed"
+    identity = contract_identity()
+    return {
+        "candidate": threshold["baselineCandidate"],
+        "evaluationID": validate_id(evaluation_id, 64, "evaluation ID"),
+        "evidenceStoreBindingID": threshold["evidenceStoreBindingID"],
+        "measurementProfileHash": measurement_identity_value["profileHash"],
+        "measurementProfileID": measurement_identity_value["profileID"],
+        "metricsArtifactID": metrics["metricsSessionID"],
+        "metricsArtifactSHA256": sha256_bytes(regular_bytes(metrics_path)),
+        "overallOutcome": overall,
+        "performanceContract": {"revision": identity["revision"], "sha256": identity["sha256"]},
+        "releaseFlowID": threshold["releaseFlowID"],
+        "ruleResults": results,
+        "schemaVersion": 1,
+        "thresholdProfileHash": threshold_hash,
+        "thresholdProfileID": threshold["profileID"],
+        "thresholdSetID": threshold_set_id,
+    }
+
+
+def collection_protocol_self_test() -> None:
+    temporary = Path(tempfile.mkdtemp(prefix="pulsephone-performance-protocol-"))
+    try:
+        executable = temporary / "fake-candidate"
+        executable.write_text(
+            """#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+def value(flag):
+    index = sys.argv.index(flag)
+    return sys.argv[index + 1]
+
+assert value('--video-connection-epoch') == '7'
+assert value('--video-device-os-build') == '23F84'
+assert value('--video-device-product-type') == 'iPhone14,7'
+assert value('--video-display-refresh-rate-millihz') == '60000'
+assert value('--video-geometry-revision') == '9'
+assert value('--video-logical-height') == '2532'
+assert value('--video-logical-width') == '1170'
+assert value('--video-mapping-proof-id') == 'proof.self-test'
+assert value('--video-orientation') == 'portrait'
+assert value('--video-source-epoch') == '11'
+assert value('--video-source-id') == 'c' * 64
+assert value('--video-window-height-pixels') == '780'
+assert value('--video-window-width-pixels') == '430'
+
+measurement = Path(value('--fixture-measurement')).read_bytes()
+metrics = Path(value('--fixture-metrics')).read_bytes()
+measurement_fd = int(value('--performance-measurement-fd'))
+metrics_fd = int(value('--performance-metrics-fd'))
+receipt_fd = int(value('--performance-receipt-fd'))
+os.write(measurement_fd, measurement)
+os.write(metrics_fd, metrics)
+receipt = {
+    'candidateInputHash': value('--performance-candidate-input-hash'),
+    'measurementSHA256': hashlib.sha256(measurement).hexdigest(),
+    'metricsSHA256': hashlib.sha256(metrics).hexdigest(),
+    'schemaVersion': 1,
+    'sessionNonce': value('--performance-session-nonce'),
+}
+os.write(receipt_fd, json.dumps(receipt, separators=(',', ':'), sort_keys=True).encode('ascii'))
+""",
+            encoding="ascii",
+        )
+        executable.chmod(0o700)
+        measurement_fixture = ROOT / "Fixtures/performance/measurement-profile/profile.v1.json"
+        metrics_fixture = ROOT / "Fixtures/performance/metrics-contract/threshold.metrics.v1.json"
+        output_root = temporary / "output"
+        output_root.mkdir(mode=0o700)
+        measurement, metrics = run_candidate_collection_protocol(
+            executable,
+            [
+                "--fixture-measurement", str(measurement_fixture),
+                "--fixture-metrics", str(metrics_fixture),
+                "--video-connection-epoch", "7",
+                "--video-device-os-build", "23F84",
+                "--video-device-product-type", "iPhone14,7",
+                "--video-display-refresh-rate-millihz", "60000",
+                "--video-geometry-revision", "9",
+                "--video-logical-height", "2532",
+                "--video-logical-width", "1170",
+                "--video-mapping-proof-id", "proof.self-test",
+                "--video-orientation", "portrait",
+                "--video-source-epoch", "11",
+                "--video-source-id", "c" * 64,
+                "--video-window-height-pixels", "780",
+                "--video-window-width-pixels", "430",
+            ],
+            output_root,
+            "protocol-self-test-nonce",
+            "a" * 64,
+            30,
+        )
+        require(measurement == regular_bytes(measurement_fixture), "protocol measurement bytes")
+        require(metrics == regular_bytes(metrics_fixture), "protocol metrics bytes")
+    finally:
+        for root, directories, files in os.walk(temporary, topdown=False):
+            for name in files:
+                (Path(root) / name).unlink()
+            for name in directories:
+                (Path(root) / name).rmdir()
+        temporary.rmdir()
+
+
+def self_test() -> Dict[str, Any]:
+    registry = validate_registry()
+    identity = contract_identity()
+    require(len(registry) == 8, "self-test registry")
+    validate_hash(identity["sha256"], "self-test identity")
+    for relative_path in ARTIFACT_PATHS[1:]:
+        schema = load_canonical(ROOT / relative_path)
+        require(schema.get("$schema") == "https://json-schema.org/draft/2020-12/schema", "schema draft")
+        require(schema.get("additionalProperties") is False, "schema root closure")
+        require(schema.get("x-pulsephone-maxEncodedBytes") == MAX_DOCUMENT_BYTES, "schema cap")
+    require(canonical_udid(" ab-cd ") == "AB-CD", "canonical UDID")
+    require(
+        target_udid_hash("AB-CD")
+        == sha256_bytes(TARGET_UDID_DOMAIN + b"AB-CD"),
+        "target UDID hash",
+    )
+    require(
+        validate_epoch_lineage([2, 5, 9], "epoch lineage self-test")
+        == [2, 5, 9],
+        "epoch lineage self-test",
+    )
+    for invalid in ([2, 2], [3, 1], [0], [True], "1"):
+        try:
+            validate_epoch_lineage(invalid, "epoch lineage negative")
+        except PerformanceError:
+            continue
+        raise PerformanceError("epoch lineage negative")
+    collection_protocol_self_test()
+    return {"outcome": "passed", "schemaVersion": 1, "tests": 13}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="performance-evidence")
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("contract-identity")
+    commands.add_parser("self-test")
+    collect_parser = commands.add_parser("collect")
+    collect_parser.add_argument("--candidate-input", required=True)
+    collect_parser.add_argument("--candidate-app")
+    collect_parser.add_argument("--target-udid", required=True)
+    collect_parser.add_argument("--minimum-duration-ms", required=True, type=int)
+    collect_parser.add_argument("--required-reconnect-count", required=True, type=int)
+    collect_parser.add_argument("--evaluation-mode", choices=("baseline", "threshold"), required=True)
+    collect_parser.add_argument("--measurement-profile-id", required=True)
+    collect_parser.add_argument("--evidence-environment-profile-id", required=True)
+    collect_parser.add_argument("--evidence-environment-profile-hash", required=True)
+    collect_parser.add_argument("--reconnect-profile-id", required=True)
+    collect_parser.add_argument("--reconnect-profile-hash", required=True)
+    collect_parser.add_argument("--threshold-profile")
+    collect_parser.add_argument("--threshold-set")
+    collect_parser.add_argument("--video-connection-epoch", type=int)
+    collect_parser.add_argument("--video-device-os-build")
+    collect_parser.add_argument("--video-device-product-type")
+    collect_parser.add_argument("--video-display-refresh-rate-millihz", type=int)
+    collect_parser.add_argument("--video-geometry-revision", type=int)
+    collect_parser.add_argument("--video-logical-height", type=int)
+    collect_parser.add_argument("--video-logical-width", type=int)
+    collect_parser.add_argument("--video-mapping-proof-id")
+    collect_parser.add_argument(
+        "--video-orientation",
+        choices=("landscapeLeft", "landscapeRight", "portrait", "portraitUpsideDown"),
+    )
+    collect_parser.add_argument("--video-source-epoch", type=int)
+    collect_parser.add_argument("--video-source-id")
+    collect_parser.add_argument("--video-window-height-pixels", type=int)
+    collect_parser.add_argument("--video-window-width-pixels", type=int)
+    collect_parser.add_argument("--objects-root", required=True)
+    validate_parser = commands.add_parser("validate-metrics")
+    validate_parser.add_argument("--metrics", required=True)
+    validate_parser.add_argument("--measurement-profile", required=True)
+    validate_parser.add_argument("--threshold-profile")
+    evaluate_parser = commands.add_parser("evaluate")
+    evaluate_parser.add_argument("--metrics", required=True)
+    evaluate_parser.add_argument("--threshold-profile", required=True)
+    evaluate_parser.add_argument("--threshold-set", required=True)
+    evaluate_parser.add_argument("--evaluation-id", required=True)
+    evaluate_parser.add_argument("--output", required=True)
+    return parser
+
+
+def main() -> int:
+    arguments = build_parser().parse_args()
+    try:
+        if arguments.command == "contract-identity":
+            result = contract_identity()
+        elif arguments.command == "self-test":
+            result = self_test()
+        elif arguments.command == "collect":
+            result = collect(arguments)
+        elif arguments.command == "validate-metrics":
+            metrics, _, _, measurement = validate_metrics(
+                Path(arguments.metrics),
+                Path(arguments.measurement_profile),
+                Path(arguments.threshold_profile) if arguments.threshold_profile else None,
+            )
+            result = {
+                "evaluationMode": metrics["evaluationMode"],
+                "measurementProfile": measurement,
+                "metricsSessionID": metrics["metricsSessionID"],
+                "outcome": "valid",
+                "schemaVersion": 1,
+            }
+        elif arguments.command == "evaluate":
+            result = evaluate(
+                Path(arguments.metrics),
+                Path(arguments.threshold_profile),
+                arguments.threshold_set,
+                arguments.evaluation_id,
+            )
+            write_canonical(Path(arguments.output), result)
+            result = {
+                "evaluationHash": sha256_bytes(canonical_bytes(result)),
+                "outcome": result["overallOutcome"],
+                "path": str(Path(arguments.output)),
+                "schemaVersion": 1,
+            }
+        else:
+            raise PerformanceError("unsupported command")
+        sys.stdout.buffer.write(canonical_bytes(result) + b"\n")
+        return 0
+    except (OSError, PerformanceError, UnicodeError, ValueError) as error:
+        print(f"performance-evidence: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,1 @@
+{"$id":"unknownOutcome.v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"reason":{"enum":["clientWaitDeadlineExceeded","commitStateUnknown","preparationObserverDeadlineExceeded","terminalDeliveryUncertain"],"type":"string"}},"required":["reason"],"type":"object","x-pulsephone-maxEncodedBytes":4096}

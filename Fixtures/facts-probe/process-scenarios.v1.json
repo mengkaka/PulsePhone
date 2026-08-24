@@ -1,0 +1,1 @@
+{"abnormalScenarios":["malformed","second-line","request-mismatch","nonzero","timeout-group"],"normalScenarios":["valid-waitpid","valid-probe"],"schemaVersion":1,"timeoutGroupChildMarkerMustExist":false}

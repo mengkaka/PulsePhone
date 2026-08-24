@@ -1,0 +1,4 @@
+interface:
+  display_name: "PulsePhone"
+  short_description: "Control connected iPhones with the PulsePhone CLI"
+  default_prompt: "Use $pulsephone to inspect and control the connected iPhone."

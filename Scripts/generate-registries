@@ -1,0 +1,1071 @@
+#!/usr/bin/ruby
+
+require "fileutils"
+require "json"
+
+class RegistryGenerationError < StandardError
+end
+
+class RegistryGenerator
+  REGISTRY_FILES = [
+    "Registries/facts-probe-wire.v1.json",
+    "Registries/guihost-wire.v1.json",
+    "Registries/helper-wire.v1.json",
+    "Registries/runtime-operations.v1.json",
+    "Registries/runtime-wire-messages.v1.json",
+  ].freeze
+
+  GENERATED_FILES = [
+    "GeneratedWireIdentifiers.generated.swift",
+    "GeneratedWireMetadata.generated.swift",
+    "GeneratedWireValidator.generated.swift",
+    "StandardErrorRegistry.generated.swift",
+  ].freeze
+
+  SWIFT_RESERVED = %w[
+    associatedtype break case catch class continue default defer deinit do else
+    enum extension fallthrough false fileprivate for func guard if import in init
+    inout internal is let nil open operator precedencegroup private protocol public
+    repeat rethrows return self Self static struct subscript super switch throw throws
+    true try typealias var where while
+  ].freeze
+
+  def initialize(repository_root)
+    @repository_root = File.expand_path(repository_root)
+    @inode_owners = {}
+    @registries = {}
+    @schema_definitions = {}
+  end
+
+  def run(language, action, options)
+    unless %w[python swift go].include?(language)
+      raise RegistryGenerationError, "unsupported language: #{language}"
+    end
+    unless %w[--stage-only --update --verify].include?(action)
+      raise RegistryGenerationError, "unsupported action: #{action}"
+    end
+
+    load_contracts
+    staging_root = expanded_option(options.fetch("--staging-root", default_staging_root(language)))
+    tracked_root = expanded_option(options.fetch("--tracked-root", default_tracked_root(language)))
+    prepare_fresh_staging(staging_root, tracked_root)
+    staging_output = File.join(staging_root, output_relative_root(language))
+    FileUtils.mkdir_p(staging_output)
+    generated = case language
+                when "swift" then swift_outputs
+                when "python" then python_outputs
+                when "go" then go_outputs
+                end
+    generated.each do |file_name, bytes|
+      File.binwrite(File.join(staging_output, file_name), bytes)
+    end
+
+    case action
+    when "--stage-only"
+      verify_output_tree(staging_output, generated)
+    when "--update"
+      replace_tracked_output(staging_output, tracked_root, generated)
+      verify_output_tree(tracked_root, generated)
+    when "--verify"
+      verify_output_tree(staging_output, generated)
+      verify_output_tree(tracked_root, generated)
+    end
+
+    puts [
+      "pulsephone-registry-generation.v1",
+      "language=#{language}",
+      "action=#{action.sub("--", "")}",
+      "files=#{generated.length}",
+      "state=passed",
+    ].join(" ")
+  end
+
+  private
+
+  def expanded_option(value)
+    File.expand_path(value, Dir.pwd)
+  end
+
+  def default_staging_root(language)
+    File.join(@repository_root, "build/generated/#{language}")
+  end
+
+  def default_tracked_root(language)
+    if language == "swift"
+      File.join(@repository_root, "Sources/PulsePhoneWire/Generated")
+    elsif language == "go"
+      File.join(@repository_root, "GoHelpers/internal/protocol/generated")
+    else
+      File.join(@repository_root, "Scripts/lib/pulsephone_contracts/generated")
+    end
+  end
+
+  def output_relative_root(language)
+    if language == "swift"
+      "Sources/PulsePhoneWire/Generated"
+    elsif language == "go"
+      "GoHelpers/internal/protocol/generated"
+    else
+      "Scripts/lib/pulsephone_contracts/generated"
+    end
+  end
+
+  def prepare_fresh_staging(staging_root, tracked_root)
+    forbidden = ["/", @repository_root, tracked_root]
+    if forbidden.include?(staging_root) || staging_root.length < 8
+      raise RegistryGenerationError, "unsafe staging root: #{staging_root}"
+    end
+    FileUtils.rm_rf(staging_root)
+    FileUtils.mkdir_p(staging_root)
+    status = File.lstat(staging_root)
+    unless status.directory? && !status.symlink?
+      raise RegistryGenerationError, "staging root is not a directory"
+    end
+  end
+
+  def load_contracts
+    @inode_owners.clear
+    standard_path = "Registries/standard-errors.v1.json"
+    @standard_registry = load_contract(standard_path)
+    REGISTRY_FILES.each do |relative_path|
+      @registries[File.basename(relative_path)] = load_contract(relative_path)
+    end
+
+    schema_paths = Dir[File.join(@repository_root, "Schemas/wire/**/*.json")].map do |absolute|
+      relative_to_repository(absolute)
+    end.sort
+    raise RegistryGenerationError, "wire schema set is empty" if schema_paths.empty?
+    schema_paths.each do |relative_path|
+      document = load_contract(relative_path)
+      collect_schema_definitions(document, relative_path)
+    end
+
+    referenced_schema_ids = []
+    referenced_error_codes = []
+    @registries.each_value do |registry|
+      validate_registry_header(registry)
+      registry.fetch("entries").each do |entry|
+        referenced_schema_ids << entry["requestSchemaID"] if entry["requestSchemaID"]
+        referenced_schema_ids << entry["responseSchemaID"] if entry["responseSchemaID"]
+        referenced_error_codes.concat(entry.fetch("allowedErrorCodes"))
+      end
+    end
+    missing_schema_ids = referenced_schema_ids.uniq - @schema_definitions.keys
+    unless missing_schema_ids.empty?
+      raise RegistryGenerationError, "unresolved schema IDs: #{missing_schema_ids.sort.join(",")}"
+    end
+    standard_codes = @standard_registry.fetch("entries").map { |entry| entry.fetch("code") }
+    missing_error_codes = referenced_error_codes.uniq - standard_codes
+    unless missing_error_codes.empty?
+      raise RegistryGenerationError, "unresolved error codes: #{missing_error_codes.sort.join(",")}"
+    end
+  end
+
+  def validate_registry_header(registry)
+    unless registry.fetch("registryVersion") == 2 && registry.fetch("protocolMajor") == 1
+      raise RegistryGenerationError, "unsupported wire registry version"
+    end
+    unless registry.fetch("revision") == "wire-registry.v9-20260822"
+      raise RegistryGenerationError, "unexpected wire registry revision"
+    end
+    ids = registry.fetch("entries").map { |entry| entry.fetch("id") }
+    unless ids == ids.sort && ids.uniq.length == ids.length
+      raise RegistryGenerationError, "registry entries are not unique ASCII order"
+    end
+  end
+
+  def load_contract(relative_path)
+    validate_relative_path(relative_path)
+    absolute_path = File.join(@repository_root, relative_path)
+    validate_regular_file(absolute_path, relative_path, @inode_owners)
+    bytes = File.binread(absolute_path)
+    parsed = JSON.parse(bytes)
+    unless parsed.is_a?(Hash) && JSON.generate(sort_object_keys(parsed)) == bytes
+      raise RegistryGenerationError, "non-canonical contract: #{relative_path}"
+    end
+    parsed
+  rescue JSON::ParserError => error
+    raise RegistryGenerationError, "invalid JSON #{relative_path}: #{error.message}"
+  end
+
+  def collect_schema_definitions(value, relative_path)
+    case value
+    when Hash
+      if value["$id"]
+        schema_id = value.fetch("$id")
+        if @schema_definitions.key?(schema_id)
+          raise RegistryGenerationError, "duplicate schema ID: #{schema_id}"
+        end
+        @schema_definitions[schema_id] = value.merge("x-source-relative-path" => relative_path)
+      end
+      value.each_value { |child| collect_schema_definitions(child, relative_path) }
+    when Array
+      value.each { |child| collect_schema_definitions(child, relative_path) }
+    end
+  end
+
+  def sort_object_keys(value)
+    case value
+    when Hash
+      value.keys.sort.each_with_object({}) do |key, result|
+        result[key] = sort_object_keys(value[key])
+      end
+    when Array
+      value.map { |child| sort_object_keys(child) }
+    else
+      value
+    end
+  end
+
+  def swift_outputs
+    {
+      "GeneratedWireIdentifiers.generated.swift" => generated_identifiers,
+      "GeneratedWireMetadata.generated.swift" => generated_metadata,
+      "GeneratedWireValidator.generated.swift" => generated_validator,
+      "StandardErrorRegistry.generated.swift" => generated_standard_errors,
+    }
+  end
+
+  def python_outputs
+    {
+      "__init__.py" => generated_python_init,
+      "registry.py" => generated_python_registry,
+    }
+  end
+
+  def go_outputs
+    {
+      "registry.go" => generated_go_registry,
+    }
+  end
+
+  def generated_go_registry
+    helper_entries = registry("helper-wire.v1.json").fetch("entries")
+    facts_entries = registry("facts-probe-wire.v1.json").fetch("entries")
+    lines = [generated_header]
+    lines << <<~GO
+      package generated
+
+      const WireRegistryRevision = #{python_string(registry("helper-wire.v1.json").fetch("revision"))}
+
+      var HelperMessageIDs = map[string]struct{}{
+    GO
+    helper_entries.sort_by { |entry| entry.fetch("id").encode("UTF-8") }.each do |entry|
+      lines << "\t#{python_string(entry.fetch("id"))}: {},\n"
+    end
+    lines << <<~GO
+      }
+
+      var HelperMessageMaxEncodedBytes = map[string]int{
+    GO
+    helper_entries.sort_by { |entry| entry.fetch("id").encode("UTF-8") }.each do |entry|
+      schema_id = entry["requestSchemaID"] || entry["responseSchemaID"]
+      max_bytes = @schema_definitions.fetch(schema_id).fetch("x-pulsephone-maxEncodedBytes")
+      lines << "\t#{python_string(entry.fetch("id"))}: #{max_bytes},\n"
+    end
+    lines << <<~GO
+      }
+
+      var FactsProbeOperationIDs = map[string]struct{}{
+    GO
+    facts_entries.sort_by { |entry| entry.fetch("id").encode("UTF-8") }.each do |entry|
+      lines << "\t#{python_string(entry.fetch("id"))}: {},\n"
+    end
+    lines << <<~GO
+      }
+
+      func IsHelperMessageID(value string) bool {
+	_, ok := HelperMessageIDs[value]
+	return ok
+      }
+
+      func HelperMessageMaximumEncodedBytes(value string) (int, bool) {
+	maximum, ok := HelperMessageMaxEncodedBytes[value]
+	return maximum, ok
+      }
+    GO
+    lines.join
+  end
+
+  def generated_python_header
+    "# Generated by Scripts/generate-registries. Do not edit.\n\n"
+  end
+
+  def generated_python_init
+    generated_python_header + <<~PYTHON
+      from .registry import *
+      from .registry import __all__
+    PYTHON
+  end
+
+  def generated_python_registry
+    values = registry_value_sets
+    runtime_messages = registry("runtime-wire-messages.v1.json").fetch("entries")
+    gui_messages = registry("guihost-wire.v1.json").fetch("entries")
+    lines = [generated_python_header]
+    lines << <<~PYTHON
+      from dataclasses import dataclass
+      from enum import Enum, IntEnum
+      from typing import Optional, Tuple
+
+
+    PYTHON
+    lines << python_string_enum("StandardErrorCode", @standard_registry.fetch("entries").map { |entry| entry.fetch("code") })
+    lines << "\n" << python_string_enum("GeneratedWireRegistryID", @registries.values.map { |item| item.fetch("registryID") }.sort)
+    lines << "\n" << python_string_enum("GeneratedWireDirection", values.fetch("direction"))
+    lines << "\n" << python_string_enum("GeneratedWireConnectionState", values.fetch("allowedConnectionStates"))
+    lines << "\n" << python_string_enum("GeneratedWireAssociation", values.fetch("association"))
+    lines << "\n" << python_string_enum("GeneratedWireTerminalPolicy", values.fetch("terminalPolicy"))
+    lines << "\n" << python_string_enum("GeneratedWireFDPolicy", values.fetch("fdPolicy"))
+    lines << "\n" << python_string_enum("GeneratedWirePayloadLimitClass", values.fetch("payloadLimitClass"))
+    lines << "\n" << python_string_enum("RuntimeOperationID", registry("runtime-operations.v1.json").fetch("entries").map { |entry| entry.fetch("id") })
+    lines << "\n" << python_string_enum("RuntimeEventKind", values.fetch("allowedEventKinds"))
+    lines << "\n" << python_string_enum("HelperWireMessageID", registry("helper-wire.v1.json").fetch("entries").map { |entry| entry.fetch("id") })
+    lines << "\n" << python_string_enum("FactsProbeOperationID", registry("facts-probe-wire.v1.json").fetch("entries").map { |entry| entry.fetch("id") })
+    lines << "\n" << python_string_enum("WireSchemaID", @schema_definitions.keys.sort)
+    lines << "\n" << python_numeric_enum("RuntimeWireMessageType", runtime_messages)
+    lines << "\n" << python_numeric_enum("GUIHostWireMessageType", gui_messages)
+    lines << <<~PYTHON
+
+
+      @dataclass(frozen=True)
+      class StandardErrorDescriptor:
+          code: StandardErrorCode
+          family: str
+          default_cli_exit: int
+          retryable: bool
+          details_schema_id: str
+          allowed_outcomes: Tuple[str, ...]
+          allowed_lifecycle_phases: Tuple[str, ...]
+          allowed_commit_states: Tuple[str, ...]
+          client_continuation_projection_policy: str
+          visibility: str
+          default_message: str
+
+
+      @dataclass(frozen=True)
+      class GeneratedWireEntry:
+          registry_id: GeneratedWireRegistryID
+          id: str
+          numeric_message_type: Optional[int]
+          direction: GeneratedWireDirection
+          allowed_connection_states: Tuple[GeneratedWireConnectionState, ...]
+          request_schema_id: Optional[WireSchemaID]
+          response_schema_id: Optional[WireSchemaID]
+          association: GeneratedWireAssociation
+          terminal_policy: GeneratedWireTerminalPolicy
+          fd_policy: GeneratedWireFDPolicy
+          payload_limit_class: GeneratedWirePayloadLimitClass
+          allowed_event_kinds: Tuple[RuntimeEventKind, ...]
+          allowed_error_codes: Tuple[StandardErrorCode, ...]
+
+
+      @dataclass(frozen=True)
+      class GeneratedWireSchemaDescriptor:
+          id: WireSchemaID
+          source_relative_path: str
+          max_encoded_bytes: Optional[int]
+          property_names: Tuple[str, ...]
+          required_property_names: Tuple[str, ...]
+
+
+      STANDARD_ERROR_REVISION = #{python_string(@standard_registry.fetch("revision"))}
+      WIRE_REGISTRY_REVISION = "wire-registry.v9-20260822"
+
+      STANDARD_ERROR_DESCRIPTORS = (
+    PYTHON
+    @standard_registry.fetch("entries").each do |entry|
+      lines << "    StandardErrorDescriptor(code=StandardErrorCode.#{python_member(entry.fetch("code"))}, " \
+        "family=#{python_string(entry.fetch("family"))}, " \
+        "default_cli_exit=#{entry.fetch("defaultCLIExit")}, " \
+        "retryable=#{python_bool(entry.fetch("retryable"))}, " \
+        "details_schema_id=#{python_string(entry.fetch("detailsSchemaID"))}, " \
+        "allowed_outcomes=#{python_string_tuple(entry.fetch("allowedOutcomes"))}, " \
+        "allowed_lifecycle_phases=#{python_string_tuple(entry.fetch("allowedLifecyclePhases"))}, " \
+        "allowed_commit_states=#{python_string_tuple(entry.fetch("allowedCommitStates"))}, " \
+        "client_continuation_projection_policy=#{python_string(entry.fetch("clientContinuationProjectionPolicy"))}, " \
+        "visibility=#{python_string(entry.fetch("visibility"))}, " \
+        "default_message=#{python_string(entry.fetch("defaultMessage"))}),\n"
+    end
+    lines << ")\n\nWIRE_ENTRIES = (\n"
+    @registries.keys.sort.each do |file_name|
+      item = @registries.fetch(file_name)
+      item.fetch("entries").each do |entry|
+        lines << generated_python_wire_entry(item.fetch("registryID"), entry)
+      end
+    end
+    lines << ")\n\nWIRE_SCHEMA_DESCRIPTORS = (\n"
+    @schema_definitions.keys.sort.each do |schema_id|
+      schema = @schema_definitions.fetch(schema_id)
+      properties = schema.fetch("properties", {}).keys.sort
+      required = schema.fetch("required", [])
+      max_bytes = schema["x-pulsephone-maxEncodedBytes"]
+      lines << "    GeneratedWireSchemaDescriptor(id=WireSchemaID.#{python_member(schema_id)}, " \
+        "source_relative_path=#{python_string(schema.fetch("x-source-relative-path"))}, " \
+        "max_encoded_bytes=#{max_bytes.nil? ? "None" : max_bytes}, " \
+        "property_names=#{python_string_tuple(properties)}, " \
+        "required_property_names=#{python_string_tuple(required)}),\n"
+    end
+    lines << <<~PYTHON
+      )
+
+
+      def decode_runtime_message_type(raw_value: int) -> Optional[RuntimeWireMessageType]:
+          return _decode_enum(RuntimeWireMessageType, raw_value)
+
+
+      def decode_gui_host_message_type(raw_value: int) -> Optional[GUIHostWireMessageType]:
+          return _decode_enum(GUIHostWireMessageType, raw_value)
+
+
+      def decode_runtime_operation(raw_value: str) -> Optional[RuntimeOperationID]:
+          return _decode_enum(RuntimeOperationID, raw_value)
+
+
+      def decode_helper_message(raw_value: str) -> Optional[HelperWireMessageID]:
+          return _decode_enum(HelperWireMessageID, raw_value)
+
+
+      def decode_facts_probe_operation(raw_value: str) -> Optional[FactsProbeOperationID]:
+          return _decode_enum(FactsProbeOperationID, raw_value)
+
+
+      def decode_standard_error(raw_value: str) -> Optional[StandardErrorCode]:
+          return _decode_enum(StandardErrorCode, raw_value)
+
+
+      def decode_schema_id(raw_value: str) -> Optional[WireSchemaID]:
+          return _decode_enum(WireSchemaID, raw_value)
+
+
+      def find_entry(
+          registry_id: GeneratedWireRegistryID,
+          *,
+          entry_id: Optional[str] = None,
+          numeric_message_type: Optional[int] = None,
+      ) -> Optional[GeneratedWireEntry]:
+          if (entry_id is None) == (numeric_message_type is None):
+              raise ValueError("exactly one entry selector is required")
+          for entry in WIRE_ENTRIES:
+              if entry.registry_id != registry_id:
+                  continue
+              if entry_id is not None and entry.id == entry_id:
+                  return entry
+              if numeric_message_type is not None and entry.numeric_message_type == numeric_message_type:
+                  return entry
+          return None
+
+
+      def find_schema_descriptor(
+          schema_id: WireSchemaID,
+      ) -> Optional[GeneratedWireSchemaDescriptor]:
+          for descriptor in WIRE_SCHEMA_DESCRIPTORS:
+              if descriptor.id == schema_id:
+                  return descriptor
+          return None
+
+
+      def allows_error(entry: GeneratedWireEntry, error_code: StandardErrorCode) -> bool:
+          return error_code in entry.allowed_error_codes
+
+
+      def allows_event(entry: GeneratedWireEntry, event_kind: RuntimeEventKind) -> bool:
+          return event_kind in entry.allowed_event_kinds
+
+
+      def allows_connection_state(
+          entry: GeneratedWireEntry,
+          connection_state: GeneratedWireConnectionState,
+      ) -> bool:
+          return connection_state in entry.allowed_connection_states
+
+
+      def _decode_enum(enum_type, raw_value):
+          try:
+              return enum_type(raw_value)
+          except ValueError:
+              return None
+
+
+      __all__ = [
+          "FactsProbeOperationID",
+          "GUIHostWireMessageType",
+          "GeneratedWireAssociation",
+          "GeneratedWireConnectionState",
+          "GeneratedWireDirection",
+          "GeneratedWireEntry",
+          "GeneratedWireFDPolicy",
+          "GeneratedWirePayloadLimitClass",
+          "GeneratedWireRegistryID",
+          "GeneratedWireSchemaDescriptor",
+          "GeneratedWireTerminalPolicy",
+          "HelperWireMessageID",
+          "RuntimeEventKind",
+          "RuntimeOperationID",
+          "RuntimeWireMessageType",
+          "STANDARD_ERROR_DESCRIPTORS",
+          "STANDARD_ERROR_REVISION",
+          "StandardErrorCode",
+          "StandardErrorDescriptor",
+          "WIRE_ENTRIES",
+          "WIRE_REGISTRY_REVISION",
+          "WIRE_SCHEMA_DESCRIPTORS",
+          "WireSchemaID",
+          "allows_connection_state",
+          "allows_error",
+          "allows_event",
+          "decode_facts_probe_operation",
+          "decode_gui_host_message_type",
+          "decode_helper_message",
+          "decode_runtime_message_type",
+          "decode_runtime_operation",
+          "decode_schema_id",
+          "decode_standard_error",
+          "find_entry",
+          "find_schema_descriptor",
+      ]
+    PYTHON
+    lines.join
+  end
+
+  def generated_python_wire_entry(registry_id, entry)
+    numeric = entry["numericMessageType"]
+    request_id = entry["requestSchemaID"]
+    response_id = entry["responseSchemaID"]
+    states = python_enum_tuple("GeneratedWireConnectionState", entry.fetch("allowedConnectionStates"))
+    events = python_enum_tuple("RuntimeEventKind", entry.fetch("allowedEventKinds"))
+    errors = python_enum_tuple("StandardErrorCode", entry.fetch("allowedErrorCodes"))
+    "    GeneratedWireEntry(registry_id=GeneratedWireRegistryID.#{python_member(registry_id)}, " \
+      "id=#{python_string(entry.fetch("id"))}, " \
+      "numeric_message_type=#{numeric.nil? ? "None" : numeric}, " \
+      "direction=GeneratedWireDirection.#{python_member(entry.fetch("direction"))}, " \
+      "allowed_connection_states=#{states}, " \
+      "request_schema_id=#{request_id ? "WireSchemaID.#{python_member(request_id)}" : "None"}, " \
+      "response_schema_id=#{response_id ? "WireSchemaID.#{python_member(response_id)}" : "None"}, " \
+      "association=GeneratedWireAssociation.#{python_member(entry.fetch("association"))}, " \
+      "terminal_policy=GeneratedWireTerminalPolicy.#{python_member(entry.fetch("terminalPolicy"))}, " \
+      "fd_policy=GeneratedWireFDPolicy.#{python_member(entry.fetch("fdPolicy"))}, " \
+      "payload_limit_class=GeneratedWirePayloadLimitClass.#{python_member(entry.fetch("payloadLimitClass"))}, " \
+      "allowed_event_kinds=#{events}, allowed_error_codes=#{errors}),\n"
+  end
+
+  def python_string_enum(type_name, raw_values)
+    values = raw_values.uniq
+    members = {}
+    values.each do |raw_value|
+      member = python_member(raw_value)
+      if members.key?(member)
+        raise RegistryGenerationError, "Python enum collision #{type_name}.#{member}"
+      end
+      members[member] = raw_value
+    end
+    lines = ["class #{type_name}(str, Enum):\n"]
+    members.each do |member, raw_value|
+      lines << "    #{member} = #{python_string(raw_value)}\n"
+    end
+    lines.join
+  end
+
+  def python_numeric_enum(type_name, entries)
+    lines = ["class #{type_name}(IntEnum):\n"]
+    members = {}
+    entries.each do |entry|
+      raw_value = entry["numericMessageType"]
+      next if raw_value.nil?
+      member = python_member(entry.fetch("id"))
+      if members.key?(member)
+        raise RegistryGenerationError, "Python numeric enum collision #{type_name}.#{member}"
+      end
+      members[member] = raw_value
+      lines << "    #{member} = #{raw_value}\n"
+    end
+    lines.join
+  end
+
+  def python_member(raw_value)
+    value = raw_value.to_s.gsub(/([a-z0-9])([A-Z])/, "\\1_\\2")
+      .gsub(/[^A-Za-z0-9]+/, "_").gsub(/\A_+|_+\z/, "").upcase
+    raise RegistryGenerationError, "empty Python identifier: #{raw_value}" if value.empty?
+    value = "VALUE_#{value}" if value =~ /^[0-9]/
+    value
+  end
+
+  def python_string(value)
+    JSON.generate(value.to_s)
+  end
+
+  def python_bool(value)
+    value ? "True" : "False"
+  end
+
+  def python_string_tuple(values)
+    python_tuple(values.map { |value| python_string(value) })
+  end
+
+  def python_enum_tuple(type_name, values)
+    python_tuple(values.map { |value| "#{type_name}.#{python_member(value)}" })
+  end
+
+  def python_tuple(expressions)
+    return "()" if expressions.empty?
+    suffix = expressions.length == 1 ? "," : ""
+    "(#{expressions.join(", ")}#{suffix})"
+  end
+
+  def generated_header
+    "// Generated by Scripts/generate-registries. Do not edit.\n\n"
+  end
+
+  def generated_standard_errors
+    entries = @standard_registry.fetch("entries")
+    lines = [generated_header, "import PulsePhoneSharedDefinitions\n\n"]
+    lines << swift_string_enum("StandardErrorCode", entries.map { |entry| entry.fetch("code") })
+    lines << <<~SWIFT
+
+      public struct StandardErrorDescriptor: Sendable {
+          public let code: StandardErrorCode
+          public let family: ErrorFamily
+          public let defaultCLIExit: Int32
+          public let retryable: Bool
+          public let detailsSchemaID: String
+          public let allowedOutcomes: [String]
+          public let allowedLifecyclePhases: [String]
+          public let allowedCommitStates: [String]
+          public let clientContinuationProjectionPolicy: String
+          public let visibility: String
+          public let defaultMessage: String
+      }
+
+      public enum GeneratedStandardErrorRegistry {
+          public static let revision = #{swift_string(@standard_registry.fetch("revision"))}
+          public static let descriptors: [StandardErrorDescriptor] = [
+    SWIFT
+    entries.each do |entry|
+      lines << "        .init(code: .#{swift_case(entry.fetch("code"))}, " \
+        "family: .#{swift_existing_case(entry.fetch("family"))}, " \
+        "defaultCLIExit: #{entry.fetch("defaultCLIExit")}, " \
+        "retryable: #{entry.fetch("retryable")}, " \
+        "detailsSchemaID: #{swift_string(entry.fetch("detailsSchemaID"))}, " \
+        "allowedOutcomes: #{swift_string_array(entry.fetch("allowedOutcomes"))}, " \
+        "allowedLifecyclePhases: #{swift_string_array(entry.fetch("allowedLifecyclePhases"))}, " \
+        "allowedCommitStates: #{swift_string_array(entry.fetch("allowedCommitStates"))}, " \
+        "clientContinuationProjectionPolicy: #{swift_string(entry.fetch("clientContinuationProjectionPolicy"))}, " \
+        "visibility: #{swift_string(entry.fetch("visibility"))}, " \
+        "defaultMessage: #{swift_string(entry.fetch("defaultMessage"))}),\n"
+    end
+    lines << "    ]\n}\n"
+    lines.join
+  end
+
+  def generated_identifiers
+    values = registry_value_sets
+    runtime_messages = registry("runtime-wire-messages.v1.json").fetch("entries")
+    gui_messages = registry("guihost-wire.v1.json").fetch("entries")
+    lines = [generated_header]
+    lines << swift_string_enum("GeneratedWireRegistryID", @registries.values.map { |item| item.fetch("registryID") }.sort)
+    lines << "\n" << swift_string_enum("GeneratedWireDirection", values.fetch("direction"))
+    lines << "\n" << swift_string_enum("GeneratedWireConnectionState", values.fetch("allowedConnectionStates"))
+    lines << "\n" << swift_string_enum("GeneratedWireAssociation", values.fetch("association"))
+    lines << "\n" << swift_string_enum("GeneratedWireTerminalPolicy", values.fetch("terminalPolicy"))
+    lines << "\n" << swift_string_enum("GeneratedWireFDPolicy", values.fetch("fdPolicy"))
+    lines << "\n" << swift_string_enum("GeneratedWirePayloadLimitClass", values.fetch("payloadLimitClass"))
+    lines << "\n" << swift_string_enum("RuntimeOperationID", registry("runtime-operations.v1.json").fetch("entries").map { |entry| entry.fetch("id") })
+    lines << "\n" << swift_string_enum("RuntimeEventKind", values.fetch("allowedEventKinds"))
+    lines << "\n" << swift_string_enum("HelperWireMessageID", registry("helper-wire.v1.json").fetch("entries").map { |entry| entry.fetch("id") })
+    lines << "\n" << swift_string_enum("FactsProbeOperationID", registry("facts-probe-wire.v1.json").fetch("entries").map { |entry| entry.fetch("id") })
+    lines << "\n" << swift_string_enum("WireSchemaID", @schema_definitions.keys.sort)
+    lines << "\n" << swift_numeric_enum("RuntimeWireMessageType", runtime_messages)
+    lines << "\n" << swift_numeric_enum("GUIHostWireMessageType", gui_messages)
+    lines.join
+  end
+
+  def registry_value_sets
+    result = {
+      "allowedConnectionStates" => [],
+      "allowedEventKinds" => [],
+      "association" => [],
+      "direction" => [],
+      "fdPolicy" => [],
+      "payloadLimitClass" => [],
+      "terminalPolicy" => [],
+    }
+    @registries.each_value do |registry|
+      registry.fetch("entries").each do |entry|
+        result["allowedConnectionStates"].concat(entry.fetch("allowedConnectionStates"))
+        result["allowedEventKinds"].concat(entry.fetch("allowedEventKinds"))
+        %w[association direction fdPolicy payloadLimitClass terminalPolicy].each do |key|
+          result[key] << entry.fetch(key)
+        end
+      end
+    end
+    result.each { |key, items| result[key] = items.uniq.sort }
+    result
+  end
+
+  def generated_metadata
+    lines = [generated_header]
+    lines << <<~SWIFT
+      public struct GeneratedWireEntry: Sendable {
+          public let registryID: GeneratedWireRegistryID
+          public let id: String
+          public let numericMessageType: UInt16?
+          public let direction: GeneratedWireDirection
+          public let allowedConnectionStates: [GeneratedWireConnectionState]
+          public let requestSchemaID: WireSchemaID?
+          public let responseSchemaID: WireSchemaID?
+          public let association: GeneratedWireAssociation
+          public let terminalPolicy: GeneratedWireTerminalPolicy
+          public let fdPolicy: GeneratedWireFDPolicy
+          public let payloadLimitClass: GeneratedWirePayloadLimitClass
+          public let allowedEventKinds: [RuntimeEventKind]
+          public let allowedErrorCodes: [StandardErrorCode]
+      }
+
+      public struct GeneratedWireSchemaDescriptor: Sendable {
+          public let id: WireSchemaID
+          public let sourceRelativePath: String
+          public let maxEncodedBytes: UInt64?
+          public let propertyNames: [String]
+          public let requiredPropertyNames: [String]
+      }
+
+      public enum GeneratedWireRegistryMetadata {
+          public static let revision = "wire-registry.v9-20260822"
+          public static let entries: [GeneratedWireEntry] = [
+    SWIFT
+    @registries.keys.sort.each do |file_name|
+      registry = @registries.fetch(file_name)
+      registry.fetch("entries").each do |entry|
+        lines << generated_wire_entry(registry.fetch("registryID"), entry)
+      end
+    end
+    lines << "    ]\n\n"
+    lines << "    public static let schemaDescriptors: [GeneratedWireSchemaDescriptor] = [\n"
+    @schema_definitions.keys.sort.each do |schema_id|
+      schema = @schema_definitions.fetch(schema_id)
+      properties = schema.fetch("properties", {}).keys.sort
+      required = schema.fetch("required", [])
+      max_bytes = schema["x-pulsephone-maxEncodedBytes"]
+      lines << "        .init(id: .#{swift_case(schema_id)}, " \
+        "sourceRelativePath: #{swift_string(schema.fetch("x-source-relative-path"))}, " \
+        "maxEncodedBytes: #{max_bytes.nil? ? "nil" : max_bytes}, " \
+        "propertyNames: #{swift_string_array(properties)}, " \
+        "requiredPropertyNames: #{swift_string_array(required)}),\n"
+    end
+    lines << "    ]\n}\n"
+    lines.join
+  end
+
+  def generated_wire_entry(registry_id, entry)
+    numeric = entry["numericMessageType"]
+    request_id = entry["requestSchemaID"]
+    response_id = entry["responseSchemaID"]
+    states = entry.fetch("allowedConnectionStates").map { |value| ".#{swift_case(value)}" }.join(", ")
+    events = entry.fetch("allowedEventKinds").map { |value| ".#{swift_case(value)}" }.join(", ")
+    errors = entry.fetch("allowedErrorCodes").map { |value| ".#{swift_case(value)}" }.join(", ")
+    "        .init(registryID: .#{swift_case(registry_id)}, " \
+      "id: #{swift_string(entry.fetch("id"))}, " \
+      "numericMessageType: #{numeric.nil? ? "nil" : numeric}, " \
+      "direction: .#{swift_case(entry.fetch("direction"))}, " \
+      "allowedConnectionStates: [#{states}], " \
+      "requestSchemaID: #{request_id ? ".#{swift_case(request_id)}" : "nil"}, " \
+      "responseSchemaID: #{response_id ? ".#{swift_case(response_id)}" : "nil"}, " \
+      "association: .#{swift_case(entry.fetch("association"))}, " \
+      "terminalPolicy: .#{swift_case(entry.fetch("terminalPolicy"))}, " \
+      "fdPolicy: .#{swift_case(entry.fetch("fdPolicy"))}, " \
+      "payloadLimitClass: .#{swift_case(entry.fetch("payloadLimitClass"))}, " \
+      "allowedEventKinds: [#{events}], allowedErrorCodes: [#{errors}]),\n"
+  end
+
+  def generated_validator
+    generated_header + <<~SWIFT
+      public enum GeneratedWireRegistryDecoder {
+          public static func runtimeMessageType(rawValue: UInt16) -> RuntimeWireMessageType? {
+              RuntimeWireMessageType(rawValue: rawValue)
+          }
+
+          public static func guiHostMessageType(rawValue: UInt16) -> GUIHostWireMessageType? {
+              GUIHostWireMessageType(rawValue: rawValue)
+          }
+
+          public static func runtimeOperation(rawValue: String) -> RuntimeOperationID? {
+              RuntimeOperationID(rawValue: rawValue)
+          }
+
+          public static func helperMessage(rawValue: String) -> HelperWireMessageID? {
+              HelperWireMessageID(rawValue: rawValue)
+          }
+
+          public static func factsProbeOperation(rawValue: String) -> FactsProbeOperationID? {
+              FactsProbeOperationID(rawValue: rawValue)
+          }
+
+          public static func standardError(rawValue: String) -> StandardErrorCode? {
+              StandardErrorCode(rawValue: rawValue)
+          }
+
+          public static func schemaID(rawValue: String) -> WireSchemaID? {
+              WireSchemaID(rawValue: rawValue)
+          }
+      }
+
+      public enum GeneratedWireRegistryValidator {
+          public static func entry(
+              registryID: GeneratedWireRegistryID,
+              id: String
+          ) -> GeneratedWireEntry? {
+              GeneratedWireRegistryMetadata.entries.first {
+                  $0.registryID == registryID && $0.id == id
+              }
+          }
+
+          public static func entry(
+              registryID: GeneratedWireRegistryID,
+              numericMessageType: UInt16
+          ) -> GeneratedWireEntry? {
+              GeneratedWireRegistryMetadata.entries.first {
+                  $0.registryID == registryID
+                      && $0.numericMessageType == numericMessageType
+              }
+          }
+
+          public static func schemaDescriptor(
+              _ schemaID: WireSchemaID
+          ) -> GeneratedWireSchemaDescriptor? {
+              GeneratedWireRegistryMetadata.schemaDescriptors.first {
+                  $0.id == schemaID
+              }
+          }
+
+          public static func allows(
+              errorCode: StandardErrorCode,
+              for entry: GeneratedWireEntry
+          ) -> Bool {
+              entry.allowedErrorCodes.contains(errorCode)
+          }
+
+          public static func allows(
+              eventKind: RuntimeEventKind,
+              for entry: GeneratedWireEntry
+          ) -> Bool {
+              entry.allowedEventKinds.contains(eventKind)
+          }
+
+          public static func allows(
+              connectionState: GeneratedWireConnectionState,
+              for entry: GeneratedWireEntry
+          ) -> Bool {
+              entry.allowedConnectionStates.contains(connectionState)
+          }
+      }
+    SWIFT
+  end
+
+  def swift_string_enum(type_name, raw_values)
+    values = raw_values.uniq
+    cases = {}
+    values.each do |raw_value|
+      case_name = swift_case(raw_value)
+      if cases.key?(case_name)
+        raise RegistryGenerationError, "Swift case collision #{type_name}.#{case_name}"
+      end
+      cases[case_name] = raw_value
+    end
+    lines = ["public enum #{type_name}: String, CaseIterable, Sendable {\n"]
+    cases.each do |case_name, raw_value|
+      lines << "    case #{case_name} = #{swift_string(raw_value)}\n"
+    end
+    lines << "}\n"
+    lines.join
+  end
+
+  def swift_numeric_enum(type_name, entries)
+    lines = ["public enum #{type_name}: UInt16, CaseIterable, Sendable {\n"]
+    cases = {}
+    entries.each do |entry|
+      raw_value = entry["numericMessageType"]
+      next if raw_value.nil?
+      case_name = swift_case(entry.fetch("id"))
+      if cases.key?(case_name)
+        raise RegistryGenerationError, "Swift numeric case collision #{type_name}.#{case_name}"
+      end
+      cases[case_name] = raw_value
+      lines << "    case #{case_name} = #{raw_value}\n"
+    end
+    lines << "}\n"
+    lines.join
+  end
+
+  def swift_case(raw_value)
+    pieces = raw_value.to_s.split(/[^A-Za-z0-9]+/).reject(&:empty?)
+    raise RegistryGenerationError, "empty Swift identifier: #{raw_value}" if pieces.empty?
+    first = lower_first(pieces.shift)
+    identifier = first + pieces.map { |piece| upper_first(piece) }.join
+    identifier = "value#{upper_first(identifier)}" if identifier =~ /^[0-9]/
+    identifier = "value#{upper_first(identifier)}" if SWIFT_RESERVED.include?(identifier)
+    identifier
+  end
+
+  def swift_existing_case(raw_value)
+    identifier = swift_case(raw_value)
+    if SWIFT_RESERVED.include?(raw_value.to_s)
+      "`#{raw_value}`"
+    else
+      identifier
+    end
+  end
+
+  def lower_first(value)
+    value[0].downcase + value[1..-1].to_s
+  end
+
+  def upper_first(value)
+    value[0].upcase + value[1..-1].to_s
+  end
+
+  def swift_string(value)
+    escaped = value.to_s.gsub("\\", "\\\\").gsub('"', '\\"')
+    "\"#{escaped}\""
+  end
+
+  def swift_string_array(values)
+    "[#{values.map { |value| swift_string(value) }.join(", ")}]"
+  end
+
+  def registry(file_name)
+    @registries.fetch(file_name)
+  end
+
+  def replace_tracked_output(staging_output, tracked_root, generated)
+    if File.exist?(tracked_root) || File.symlink?(tracked_root)
+      FileUtils.rm_rf(tracked_root)
+    end
+    FileUtils.mkdir_p(tracked_root)
+    generated.keys.sort.each do |file_name|
+      File.binwrite(
+        File.join(tracked_root, file_name),
+        File.binread(File.join(staging_output, file_name))
+      )
+    end
+  end
+
+  def verify_output_tree(root, generated)
+    unless File.directory?(root) && !File.symlink?(root)
+      raise RegistryGenerationError, "generated root is not a real directory: #{root}"
+    end
+    actual_paths = []
+    inode_owners = {}
+    expected_paths = generated.keys.sort
+    expected_directories = expected_paths.flat_map do |relative_path|
+      components = relative_path.split("/")
+      (1...components.length).map { |length| components.first(length).join("/") }
+    end.uniq
+    walk_output_tree(
+      root,
+      root,
+      actual_paths,
+      inode_owners,
+      expected_directories
+    )
+    unless actual_paths.sort == expected_paths
+      raise RegistryGenerationError,
+        "generated path set mismatch expected=#{expected_paths.inspect} actual=#{actual_paths.sort.inspect}"
+    end
+    expected_paths.each do |relative_path|
+      actual = File.binread(File.join(root, relative_path))
+      expected = generated.fetch(relative_path)
+      unless actual == expected
+        raise RegistryGenerationError, "generated bytes mismatch: #{relative_path}"
+      end
+    end
+  end
+
+  def walk_output_tree(root, current, paths, inode_owners, expected_directories)
+    Dir.children(current).sort.each do |entry|
+      absolute_path = File.join(current, entry)
+      status = File.lstat(absolute_path)
+      if status.symlink?
+        raise RegistryGenerationError, "generated symlink forbidden: #{absolute_path}"
+      elsif status.directory?
+        relative_path = absolute_path.sub(%r{\A#{Regexp.escape(root)}/?}, "")
+        unless expected_directories.include?(relative_path)
+          raise RegistryGenerationError, "unexpected generated directory: #{relative_path}"
+        end
+        walk_output_tree(
+          root,
+          absolute_path,
+          paths,
+          inode_owners,
+          expected_directories
+        )
+      elsif status.file?
+        relative_path = absolute_path.sub(%r{\A#{Regexp.escape(root)}/?}, "")
+        validate_relative_path(relative_path)
+        validate_regular_file(absolute_path, relative_path, inode_owners)
+        paths << relative_path
+      else
+        raise RegistryGenerationError, "unsupported generated node: #{absolute_path}"
+      end
+    end
+  end
+
+  def validate_regular_file(absolute_path, display_path, inode_owners)
+    status = File.lstat(absolute_path)
+    unless status.file? && !status.symlink?
+      raise RegistryGenerationError, "regular file required: #{display_path}"
+    end
+    unless status.nlink == 1
+      raise RegistryGenerationError, "hardlink forbidden: #{display_path}"
+    end
+    identity = [status.dev, status.ino]
+    if inode_owners.key?(identity)
+      raise RegistryGenerationError,
+        "duplicate inode #{display_path} and #{inode_owners.fetch(identity)}"
+    end
+    inode_owners[identity] = display_path
+  end
+
+  def validate_relative_path(relative_path)
+    if relative_path.start_with?("/") || relative_path.include?("\\")
+      raise RegistryGenerationError, "invalid relative path: #{relative_path}"
+    end
+    segments = relative_path.split("/", -1)
+    if segments.empty? || segments.any? { |segment| segment.empty? || segment == "." || segment == ".." }
+      raise RegistryGenerationError, "invalid relative path: #{relative_path}"
+    end
+  end
+
+  def relative_to_repository(absolute_path)
+    prefix = @repository_root + "/"
+    unless absolute_path.start_with?(prefix)
+      raise RegistryGenerationError, "path outside repository: #{absolute_path}"
+    end
+    absolute_path[prefix.length..-1]
+  end
+end
+
+def parse_arguments(arguments)
+  language = arguments.shift
+  action = arguments.shift
+  options = {}
+  until arguments.empty?
+    key = arguments.shift
+    unless %w[--staging-root --tracked-root].include?(key)
+      raise RegistryGenerationError, "unknown option: #{key}"
+    end
+    value = arguments.shift
+    raise RegistryGenerationError, "missing value for #{key}" if value.nil?
+    raise RegistryGenerationError, "duplicate option: #{key}" if options.key?(key)
+    options[key] = value
+  end
+  [language, action, options]
+end
+
+begin
+  language, action, options = parse_arguments(ARGV.dup)
+  repository_root = File.expand_path("..", __dir__)
+  RegistryGenerator.new(repository_root).run(language, action, options)
+rescue RegistryGenerationError, Errno::ENOENT, Errno::EACCES => error
+  warn "generate-registries: #{error.message}"
+  exit 2
+end

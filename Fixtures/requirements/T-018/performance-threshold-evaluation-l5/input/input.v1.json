@@ -1,0 +1,1 @@
+{"cases":[{"comparator":"lessThanOrEqual","expected":"passed","limit":100,"observed":100},{"comparator":"greaterThanOrEqual","expected":"failed","limit":100,"observed":99},{"dataQuality":"gap","expected":"unknown"}],"thresholdProfilePath":"Fixtures/performance/threshold-profile/profile.v1.json"}

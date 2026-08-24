@@ -1,0 +1,1 @@
+{"$id":"guiHost.v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"stage":{"enum":["ack","connect","createWindow","reserve","write"],"type":"string"}},"required":["stage"],"type":"object","x-pulsephone-maxEncodedBytes":8192}

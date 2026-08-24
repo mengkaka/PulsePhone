@@ -1,0 +1,1 @@
+{"mountRoles":["personalized.buildManifest","personalized.image","personalized.trustCache"],"requestTSSRoles":["personalized.buildManifest","personalized.image"],"schemaVersion":1}
