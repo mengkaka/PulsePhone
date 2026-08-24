@@ -36,7 +36,7 @@ cleanup() {
 [ "$(/usr/bin/id -u)" -ne 0 ] || fail "do not run with sudo"
 require_macos_arm64
 
-temporary_directory="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/pulsephone-install.XXXXXX")"
+temporary_directory="$(/usr/bin/mktemp -d -t pulsephone-install)"
 trap cleanup EXIT HUP INT TERM
 
 archive_path="${temporary_directory}/${asset_name}"

@@ -29,6 +29,7 @@ class InstallPulsePhoneScriptTests(unittest.TestCase):
             'readonly team_identifier="GZC4TSS5TG"',
             'releases/latest/download',
             'trap cleanup EXIT HUP INT TERM',
+            '/usr/bin/mktemp -d -t pulsephone-install',
             '/usr/bin/shasum -a 256',
             '/usr/bin/ditto -x -k',
             '/usr/bin/codesign --verify --deep --strict',
@@ -37,6 +38,7 @@ class InstallPulsePhoneScriptTests(unittest.TestCase):
         ]:
             self.assertIn(required, script)
         self.assertNotIn('sudo ', script)
+        self.assertNotIn('${TMPDIR:-/tmp}/pulsephone-install.XXXXXX', script)
 
 
 if __name__ == "__main__":
