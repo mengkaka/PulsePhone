@@ -120,11 +120,14 @@ def codesign_arguments(identity: str, identifier: str, path: Path) -> list[str]:
     ]
 
 
-def signature_details(path: Path) -> dict[str, list[str]]:
-    output = command_output(
+def signature_output(path: Path) -> str:
+    return command_output(
         ["/usr/bin/codesign", "-d", "--verbose=4", str(path)],
         include_stderr=True,
     )
+
+
+def signature_details(output: str) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {}
     for line in output.splitlines():
         if "=" not in line:
@@ -134,16 +137,24 @@ def signature_details(path: Path) -> dict[str, list[str]]:
     return result
 
 
+def has_hardened_runtime(output: str) -> bool:
+    return any(
+        line.startswith("CodeDirectory ") and "flags=" in line and "(runtime)" in line
+        for line in output.splitlines()
+    )
+
+
 def require_developer_id_signature(path: Path) -> None:
     run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", str(path)])
-    details = signature_details(path)
+    output = signature_output(path)
+    details = signature_details(output)
     authorities = details.get("Authority", [])
     require(
         any(value.startswith("Developer ID Application: ") for value in authorities),
         "release app is not signed with Developer ID Application",
     )
     require(details.get("TeamIdentifier") == [TEAM_IDENTIFIER], "release signing team")
-    require(any("runtime" in value for value in details.get("CodeDirectory", [])), "release hardened runtime")
+    require(has_hardened_runtime(output), "release hardened runtime")
     require("Timestamp" in details, "release secure timestamp")
 
 
@@ -248,9 +259,13 @@ def self_test() -> dict[str, Any]:
     require(IDENTITY.fullmatch('  1) A' + '0' * 39 + ' "Apple Development: Test (GZC4TSS5TG)"') is None, "development identity rejected")
     require(KEYCHAIN_PROFILE.fullmatch("PulsePhoneNotary") is not None, "keychain profile parsing")
     require(KEYCHAIN_PROFILE.fullmatch("unsafe/profile") is None, "unsafe keychain profile rejected")
+    require(
+        has_hardened_runtime("CodeDirectory v=20500 flags=0x10000(runtime) hashes=1+2 location=embedded"),
+        "hardened runtime parsing",
+    )
     require(ARCHIVE_NAME == "PulsePhone-macos-arm64.zip", "release asset name")
     require(BUNDLE_IDENTIFIER == "com.pulsephone.PulsePhone", "release bundle ID")
-    return {"outcome": "passed", "schemaVersion": 1, "tests": 6}
+    return {"outcome": "passed", "schemaVersion": 1, "tests": 7}
 
 
 def main() -> int:

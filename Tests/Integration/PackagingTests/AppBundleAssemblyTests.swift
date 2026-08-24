@@ -121,7 +121,7 @@ final class AppBundleAssemblyTests: XCTestCase {
         let result = try XCTUnwrap(JSONSerialization.jsonObject(with: resultData) as? [String: Any])
         XCTAssertEqual(result["schemaVersion"] as? Int, 1)
         XCTAssertEqual(result["outcome"] as? String, "passed")
-        XCTAssertEqual(result["tests"] as? Int, 6)
+        XCTAssertEqual(result["tests"] as? Int, 7)
     }
 
     func testDevRebuildLiveSelfTestClosesProcessSelectionAndTargetPaths() throws {
