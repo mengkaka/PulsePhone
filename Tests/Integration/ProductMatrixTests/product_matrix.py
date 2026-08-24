@@ -334,6 +334,8 @@ def readme_bytes(
         "",
         "PulsePhone is a macOS 14+ command-line and live-control client for USB-connected iPhones. The public surface below is projected from the frozen command catalog; implementation evidence is not a release or physical-device compatibility claim.",
         "",
+        "Use PulsePhone on supported iPhones without installing Xcode. It does not install or depend on WebDriver or an XCTest Runner.",
+        "",
         "## Public Contract",
         "",
         f"- Command matrix: `{surface['matrixRevision']}`",
