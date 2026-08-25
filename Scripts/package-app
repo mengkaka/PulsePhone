@@ -892,7 +892,7 @@ def parse_process_snapshot(value: str) -> list[ProcessIdentity]:
         except ValueError as error:
             raise PackagingError("invalid process snapshot identity") from error
         require(
-            pid > 0 and parent_pid >= 0 and process_group_id > 0 and user_id >= 0,
+            pid > 0 and parent_pid >= 0 and process_group_id > 0,
             "invalid process snapshot identity",
         )
         processes.append(ProcessIdentity(
@@ -1331,8 +1331,9 @@ def self_test() -> dict[str, Any]:
             "102 101 101 501 Mon Jul 27 10:23:53 2026 "
             + str(STAGING / "PulsePhone.app/Contents/Helpers/PulsePhoneRuntime")
             + " --canonical-udid TEST-UDID\n"
+            "103 1 103 -2 Mon Jul 27 10:23:54 2026 /usr/libexec/dhcp6d\n"
         )
-        require(len(fake_processes) == 2, "process snapshot rows")
+        require(len(fake_processes) == 3, "process snapshot rows")
         require(
             [item.pid for item in staging_gui_host_processes(fake_processes)] == [101],
             "staging GUIHost process filter",
