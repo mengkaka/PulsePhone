@@ -55,6 +55,7 @@
 | `OBS-033` | Element Live 帧复用拒绝首次绑定的临时几何 | High | `resolved` | revision 0 provisional 生命周期兼容、clean Gate 与 fresh packaged 实体 Live 闭环 |
 | `OBS-034` | Developer Support preparation 未接入生产单飞与 remediation 合同 | High | `resolved` | build 22 iOS 26.5.2 fresh-generation rehydration、Live preflight 与 cleanup 已闭环 |
 | `OBS-035` | `type --text` 第二次调用复用已关闭的 Pasteboard 会话 | High | `resolved` | `f2071f0` 修复；iOS 26.5.2 连续实体输入通过，无粘贴权限弹窗 |
+| `OBS-036` | 高位 ECID 被 Lockdown 整数解析拒绝，导致 iOS 17+ prepare 误报 Developer Support 不可用 | High | `investigating` | 高位 `UniqueChipID` unsigned parsing；等待 packaged candidate 验证 |
 
 ## OBS-001：关闭已绑定视频的 live 窗口时 GUIHost 崩溃
 
@@ -1579,3 +1580,30 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 - `f2071f0` 的最小本地测试安装只替换并重新签名了 `PulsePhoneCoreDeviceHelper`，未修改受控 staging candidate，且不作为发布产物。全局 launcher 确认指向 `/Users/a/Applications/PulsePhone.app/Contents/MacOS/PulsePhone`；bundle `codesign --verify --deep --strict` 通过，安装 helper 与测试 helper SHA-256 均为 `4629a256f10edf6d2430be3842132528b435de98acc1e345db5ef3b643df61d9`。
 - owner 在 iOS 26.5.2 / `23F84`、UDID `00008110-001A7D523E90401E` 的已聚焦无害文本框中完成 `device prepare` 后连续执行两次 `PulsePhone type --text ... --json`，并确认两次均通过、可见文本完整且没有粘贴权限弹窗。该结论关闭本条的实体范围；原始命令结果未提交。
 - 随后从 clean `e42011806b13309a9ae422a5f9c8fcb3233cc4e6` 组装正式 staging candidate `0.1.0 (26)`，candidate input 为 `build/evidence/objects/2b3e653065dfbb96d03356ca3db39fc21dd2c7d3547b55d20714dd41738ecd3a/release-candidate-input.v1.json`，`appBundleContentHash=a256f178c4fd6d171f5b7ad470c869b25ba71a1296cdf7fe776f152f85b42a36`。staging 经 self-install 更新到 `/Users/a/Applications/PulsePhone.app`；两边 `version` 均为 build 26、CLI/CoreDevice helper 逐字一致、deep/strict codesign 均通过、Python artifact 扫描为零。staging helper SHA-256=`e1bbcca77e36331b3df46c0fc811625473f63bc59a0af7662eb4716af55bd745`；它与已验收测试 helper 的 Go build ID 相同，去除签名且归一化唯一 16-byte `LC_UUID` 后逐字一致，故不会把 package-app 的确定性 UUID/signature 重写误判为未验收的逻辑差异。
+
+## OBS-036：高位 ECID 被 Lockdown 整数解析拒绝
+
+### 当前状态
+
+- 状态：`investigating`
+- 发现日期：2026-08-25
+- 严重度：High
+- 影响范围：iOS 17+ personalized Developer Support 的已挂载镜像查询和 `PulsePhone device prepare`。
+
+### 已确认根因与修复边界
+
+- 在 iPhone virtual device `0000FE01-8CBDBFB959DA98F8` 上，Lockdown 的 `UniqueChipID` 解码为
+  `int64(-8305271335003973384)`。其无符号 64 位位模式为
+  `10141472738705578232`，与 Xcode `devicectl` 的 ECID 一致。
+- 该值是高位 ECID 的有符号 plist 载体，不是负 ECID。`manifestUint` 正确地拒绝负数，
+  但不适合解析语义固定为无符号标识符的 `UniqueChipID`。
+- 修复只在 `OpenCoreDevicePersonalizedMounter` 读取 `UniqueChipID` 时采用专用无符号解析，
+  不放宽 catalog、size、epoch、chip 或 board 等通用字段的整数验证。
+
+### 当前验证与关闭标准
+
+- 高位、正常和无效 ECID 的 Go 回归测试已经通过。
+- 2026-08-25 使用此修复从源码编译 CoreDevice helper，在上述设备执行完整 helper wire 链路：
+  `queryMounted` 返回 `mounted=true`，`warmGeneration` 随后成功打开全部七项 CoreDevice 服务。
+- 新 packaged candidate 的 `PulsePhone device prepare --udid 0000FE01-8CBDBFB959DA98F8 --json`
+  不得再因 `personalization ECID` 失败；若有后续失败，必须报告其新的 typed root cause。

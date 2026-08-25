@@ -811,6 +811,22 @@ func manifestUint(value any) (uint64, bool) {
 	}
 }
 
+// lockdownECID preserves the 64-bit bit pattern of UniqueChipID. Lockdown
+// plists use a signed integer carrier, while ECID is an unsigned identifier.
+func lockdownECID(value any) (uint64, bool) {
+	switch value := value.(type) {
+	case int64:
+		return uint64(value), value != 0
+	case uint64:
+		return value, value != 0
+	case string:
+		parsed, err := strconv.ParseUint(value, 0, 64)
+		return parsed, err == nil && parsed != 0
+	default:
+		return 0, false
+	}
+}
+
 func positiveInt64(value any) (int64, bool) {
 	switch value := value.(type) {
 	case int64:
@@ -1007,8 +1023,8 @@ func OpenCoreDevicePersonalizedMounter(rawUDID string, deadline time.Time) (Pers
 		lockdown.Close()
 		return nil, err
 	}
-	ecid, ok := manifestUint(ecID)
-	if !ok || ecid == 0 {
+	ecid, ok := lockdownECID(ecID)
+	if !ok {
 		lockdown.Close()
 		return nil, personalizedError("personalization ECID")
 	}

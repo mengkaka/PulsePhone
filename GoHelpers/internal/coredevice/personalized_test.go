@@ -46,6 +46,51 @@ func TestContentManifestCanonicalVectorMatchesSwiftRuntime(t *testing.T) {
 	}
 }
 
+func TestLockdownECIDPreservesUnsignedIntegerBitPattern(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  uint64
+		ok    bool
+	}{
+		{
+			name:  "positive signed plist integer",
+			value: int64(1234),
+			want:  1234,
+			ok:    true,
+		},
+		{
+			name:  "high-bit signed plist integer",
+			value: int64(-8305271335003973384),
+			want:  uint64(10141472738705578232),
+			ok:    true,
+		},
+		{
+			name:  "unsigned integer",
+			value: uint64(10141472738705578232),
+			want:  uint64(10141472738705578232),
+			ok:    true,
+		},
+		{
+			name:  "decimal string",
+			value: "10141472738705578232",
+			want:  uint64(10141472738705578232),
+			ok:    true,
+		},
+		{name: "zero", value: int64(0)},
+		{name: "negative string", value: "-1"},
+		{name: "non-integer", value: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := lockdownECID(test.value)
+			if ok != test.ok || got != test.want {
+				t.Fatalf("lockdownECID(%#v) = (%d, %t), want (%d, %t)", test.value, got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
 func TestPersonalizedCatalogAndAssetLease(t *testing.T) {
 	root := canonicalPersonalizedTestRoot(t)
 	roleBytes := map[string][]byte{
