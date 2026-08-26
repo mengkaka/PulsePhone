@@ -36,28 +36,22 @@ option or compatibility contract is uncertain. Help is local and does not touch 
 
 ## Observe And Control
 
-Use `--json` for agent work except Help and the default JSON `element snapshot`. Verify every
-visible mutation with a fresh observation; a successful command alone is not proof of the
-user-visible result.
-
-```text
-observe current viewport -> choose target -> act -> observe again
-```
+Use `--json` for agent work except Help and the default JSON `element snapshot`. For visible
+changes, observe the current viewport, choose a target, act, then observe again; command success
+alone is not proof of the user-visible result.
 
 Use the least invasive observation that answers the task:
 
 ```bash
 PulsePhone element snapshot --udid <UDID>
 PulsePhone screenshot --output /absolute/capture.png --udid <UDID> --json
-PulsePhone element snapshot --format both --output /absolute/elements.png --udid <UDID>
-PulsePhone live --udid <UDID> --json
 ```
 
 `element snapshot` covers only the current viewport. For a selected element, use
 `center.normalized.x` and `center.normalized.y` directly; coordinates for `tap`, `swipe`, and
 `drag` are normalized `0...1`. When a target is absent, make one intentional swipe, observe again,
-then reassess. Do not infer persistent element IDs, off-screen elements, or a successful tap from
-command success alone.
+then reassess. Do not infer persistent element IDs or off-screen targets. If the same action has
+no visible effect twice, re-observe and change strategy.
 
 ```bash
 PulsePhone tap --x 0.5 --y 0.5 --udid <UDID> --json
@@ -97,12 +91,11 @@ PulsePhone button mute --udid <UDID> --json
 ```
 
 Install and uninstall change device contents: perform them only on explicit user request, require
-an absolute IPA path, and verify with `apps` when useful. Screenshot and annotation output paths
-must be absolute; add `--force` only when replacing that existing output is intended.
+an absolute IPA path, and verify with `apps` when useful. Screenshot output paths must be absolute;
+add `--force` only when replacing that existing output is intended.
 
 Start and stop trace or diagnostics recordings as matched pairs. Clear logs only when the user
-asked to do so. Use `live --select-source` only when the user wants to replace or choose the Mac
-capture source.
+asked to do so.
 
 ## Interpret And Recover
 
