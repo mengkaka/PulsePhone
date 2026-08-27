@@ -172,8 +172,8 @@ public final class ProductionRuntimeDeviceCoordinator: @unchecked Sendable {
             canonicalUDID: canonicalUDID,
             catalog: catalog,
             discovery: {
-                guard let device = try deviceDiscovery.discover().device(
-                    for: canonicalUDID
+                guard let device = try deviceDiscovery.discover(
+                    canonicalUDID: canonicalUDID
                 ) else {
                     return nil
                 }

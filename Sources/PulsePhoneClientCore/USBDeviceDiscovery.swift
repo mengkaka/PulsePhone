@@ -55,10 +55,65 @@ public struct USBDeviceDiscovery: Sendable {
         }
     }
 
+    public func discover(
+        canonicalUDID: CanonicalUDID
+    ) throws -> USBDiscoveredDevice? {
+        let rawSnapshot = try factsProvider.enumerate()
+        let (usbDevices, identityMap) = try Self.validatedUSBDevices(
+            rawSnapshot
+        )
+        guard let rawTransportUDID = identityMap.rawTransportUDID(
+            for: canonicalUDID
+        ), let device = usbDevices.first(where: {
+            $0.rawTransportUDID == rawTransportUDID
+        })
+        else {
+            return nil
+        }
+        return try Self.materialize(
+            device,
+            canonicalUDID: canonicalUDID
+        ) { device in
+            try factsProvider.probe(
+                deviceID: device.deviceID,
+                rawTransportUDID: device.rawTransportUDID
+            )
+        }
+    }
+
     static func materialize(
         _ rawSnapshot: RawDiscoverySnapshot,
         probe: (RawDiscoveredDevice) throws -> LocalDeviceFactsResult
     ) throws -> USBDiscoverySnapshot {
+        let (usbDevices, identityMap) = try validatedUSBDevices(rawSnapshot)
+        var materialized = [USBDiscoveredDevice]()
+        materialized.reserveCapacity(usbDevices.count)
+        for device in usbDevices {
+            guard let canonicalUDID = identityMap.canonicalUDID(
+                forRawTransportUDID: device.rawTransportUDID
+            ) else {
+                throw USBDeviceDiscoveryError.probeIdentityMismatch(
+                    deviceID: device.deviceID
+                )
+            }
+            materialized.append(
+                try Self.materialize(
+                    device,
+                    canonicalUDID: canonicalUDID,
+                    probe: probe
+                )
+            )
+        }
+        materialized.sort { $0.canonicalUDID < $1.canonicalUDID }
+        return USBDiscoverySnapshot(
+            observedAtMonotonicNanoseconds: rawSnapshot.observedAtMonotonicNanoseconds,
+            devices: materialized
+        )
+    }
+
+    private static func validatedUSBDevices(
+        _ rawSnapshot: RawDiscoverySnapshot
+    ) throws -> ([RawDiscoveredDevice], DeviceIdentityMap) {
         guard rawSnapshot.devices.count <= LocalDeviceFactsProbe.deviceLimit else {
             throw USBDeviceDiscoveryError.snapshotLimitExceeded(
                 actual: rawSnapshot.devices.count,
@@ -83,33 +138,26 @@ public struct USBDeviceDiscovery: Sendable {
             throw USBDeviceDiscoveryError.invalidIdentity(error)
         }
 
-        var materialized = [USBDiscoveredDevice]()
-        materialized.reserveCapacity(usbDevices.count)
-        for device in usbDevices {
-            let result = try probe(device)
-            guard result.facts.uniqueDeviceID == device.rawTransportUDID,
-                  let canonicalUDID = identityMap.canonicalUDID(
-                    forRawTransportUDID: device.rawTransportUDID
-                  )
-            else {
-                throw USBDeviceDiscoveryError.probeIdentityMismatch(
-                    deviceID: device.deviceID
-                )
-            }
-            materialized.append(
-                USBDiscoveredDevice(
-                    deviceID: device.deviceID,
-                    rawTransportUDID: device.rawTransportUDID,
-                    canonicalUDID: canonicalUDID,
-                    facts: result.facts,
-                    condition: result.condition
-                )
+        return (usbDevices, identityMap)
+    }
+
+    private static func materialize(
+        _ device: RawDiscoveredDevice,
+        canonicalUDID: CanonicalUDID,
+        probe: (RawDiscoveredDevice) throws -> LocalDeviceFactsResult
+    ) throws -> USBDiscoveredDevice {
+        let result = try probe(device)
+        guard result.facts.uniqueDeviceID == device.rawTransportUDID else {
+            throw USBDeviceDiscoveryError.probeIdentityMismatch(
+                deviceID: device.deviceID
             )
         }
-        materialized.sort { $0.canonicalUDID < $1.canonicalUDID }
-        return USBDiscoverySnapshot(
-            observedAtMonotonicNanoseconds: rawSnapshot.observedAtMonotonicNanoseconds,
-            devices: materialized
+        return USBDiscoveredDevice(
+            deviceID: device.deviceID,
+            rawTransportUDID: device.rawTransportUDID,
+            canonicalUDID: canonicalUDID,
+            facts: result.facts,
+            condition: result.condition
         )
     }
 }

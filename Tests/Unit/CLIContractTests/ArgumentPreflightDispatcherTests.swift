@@ -8,6 +8,38 @@ import PulsePhoneWire
 import XCTest
 
 final class ArgumentPreflightDispatcherTests: XCTestCase {
+    func testFactsProbeTimeoutUsesRetryablePublicError() throws {
+        let process = PulsePhoneCLIProcess(
+            makeStaticSurface: Self.staticSurface,
+            makeProductVersion: Self.productVersion,
+            makeQueries: { throw LocalDeviceFactsProbeError.workTimeout },
+            makeActionLogMaintenance: Self.missingActionLogMaintenance,
+            runtimeRequest: { _, _, _, _, _ in
+                XCTFail("Runtime must not be contacted after probe timeout")
+                return try Self.failedRuntimeResult(code: "runtimeFailed")
+            }
+        )
+
+        let output = process.run(arguments: [
+            "device", "prepare", "--udid", "AAAA", "--json",
+        ])
+
+        XCTAssertEqual(output.exitCode, 6)
+        let envelope = try XCTUnwrap(try json(output.chunk.stdout[0]))
+        XCTAssertEqual(envelope["commandID"] as? String, "device.prepare")
+        XCTAssertEqual(
+            envelope["target"] as? [String: String],
+            ["requestedUDID": "AAAA", "scope": "unresolved"]
+        )
+        let error = try XCTUnwrap(envelope["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "probeUnavailable")
+        XCTAssertEqual(error["message"] as? String, "Probe Unavailable")
+        XCTAssertEqual(
+            (error["details"] as? [String: String])?["reason"],
+            "timeout"
+        )
+    }
+
     func testExistingProductionVariantsReachOwnedProductionRoute() throws {
         let recorder = RuntimeRequestRecorder()
         let process = PulsePhoneCLIProcess(

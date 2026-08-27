@@ -1612,6 +1612,14 @@ public struct PulsePhoneCLIProcess: Sendable {
                     target: target,
                     adapter: adapter
                 )
+            case LocalDeviceFactsProbeError.workTimeout:
+                return try standardFailure(
+                    code: "probeUnavailable",
+                    commandID: commandID,
+                    target: target,
+                    adapter: adapter,
+                    details: ["reason": "timeout"]
+                )
             case is CanonicalUDIDError:
                 return try standardFailure(
                     code: "invalidUDID",

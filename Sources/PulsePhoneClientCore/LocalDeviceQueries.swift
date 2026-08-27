@@ -3,9 +3,20 @@ import PulsePhoneSharedDefinitions
 
 public protocol USBDeviceDiscovering: Sendable {
     func discover() throws -> USBDiscoverySnapshot
+    func discover(
+        canonicalUDID: CanonicalUDID
+    ) throws -> USBDiscoveredDevice?
 }
 
 extension USBDeviceDiscovery: USBDeviceDiscovering {}
+
+public extension USBDeviceDiscovering {
+    func discover(
+        canonicalUDID: CanonicalUDID
+    ) throws -> USBDiscoveredDevice? {
+        try discover().device(for: canonicalUDID)
+    }
+}
 
 public enum DeviceFactsProvenance: String, Codable, Equatable, Sendable {
     case factsProbe
@@ -79,11 +90,10 @@ public struct LocalDeviceQueries: Sendable {
     public func deviceInfo(
         canonicalUDID: CanonicalUDID? = nil
     ) throws -> DeviceInfoResult {
-        let (snapshot, provenance) = try loadSnapshot()
-        let selected = try select(canonicalUDID, from: snapshot)
-        let facts = selected.device.facts
+        let (device, provenance) = try loadDevice(canonicalUDID: canonicalUDID)
+        let facts = device.facts
         return DeviceInfoResult(
-            canonicalUDID: selected.device.canonicalUDID,
+            canonicalUDID: device.canonicalUDID,
             deviceClass: try Self.required(
                 facts.deviceClass,
                 field: "deviceClass",
@@ -107,13 +117,35 @@ public struct LocalDeviceQueries: Sendable {
     public func deviceStatus(
         canonicalUDID: CanonicalUDID? = nil
     ) throws -> DeviceStatusResult {
-        let (snapshot, _) = try loadSnapshot()
-        let selected = try select(canonicalUDID, from: snapshot)
+        let (device, _) = try loadDevice(canonicalUDID: canonicalUDID)
         return DeviceStatusResult(
-            canonicalUDID: selected.device.canonicalUDID,
-            condition: Self.statusCondition(selected.device.condition),
-            name: try Self.optionalName(selected.device.facts.deviceName)
+            canonicalUDID: device.canonicalUDID,
+            condition: Self.statusCondition(device.condition),
+            name: try Self.optionalName(device.facts.deviceName)
         )
+    }
+
+    private func loadDevice(
+        canonicalUDID: CanonicalUDID?
+    ) throws -> (USBDiscoveredDevice, DeviceFactsProvenance) {
+        guard let canonicalUDID else {
+            let (snapshot, provenance) = try loadSnapshot()
+            return (try select(nil, from: snapshot).device, provenance)
+        }
+        switch source {
+        case let .discovery(discovery):
+            guard let device = try discovery.discover(
+                canonicalUDID: canonicalUDID
+            ) else {
+                throw LocalDeviceQueryError.deviceNotFound(canonicalUDID)
+            }
+            return (device, .factsProbe)
+        case let .snapshot(snapshot):
+            guard let device = snapshot.device(for: canonicalUDID) else {
+                throw LocalDeviceQueryError.deviceNotFound(canonicalUDID)
+            }
+            return (device, .snapshot)
+        }
     }
 
     private func loadSnapshot() throws -> (

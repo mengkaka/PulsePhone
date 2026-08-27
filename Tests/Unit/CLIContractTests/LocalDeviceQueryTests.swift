@@ -62,6 +62,38 @@ final class LocalDeviceQueryTests: XCTestCase {
         XCTAssertEqual(result.probeProvenance, .factsProbe)
     }
 
+    func testExplicitInfoProbesOnlyRequestedDevice() throws {
+        let provider = RecordingFactsProvider(
+            rawDevices: [raw(1, "AAAA"), raw(2, "BBBB")],
+            outcomes: [
+                1: .failure(.unexpectedProbe),
+                2: .success(facts(udid: "BBBB", name: "Chosen")),
+            ]
+        )
+        let result = try LocalDeviceQueries(
+            discovery: USBDeviceDiscovery(factsProvider: provider)
+        ).deviceInfo(canonicalUDID: try CanonicalUDID(canonicalString: "BBBB"))
+
+        XCTAssertEqual(result.name, "Chosen")
+        XCTAssertEqual(provider.probedDeviceIDs, [2])
+    }
+
+    func testExplicitStatusProbesOnlyRequestedDevice() throws {
+        let provider = RecordingFactsProvider(
+            rawDevices: [raw(1, "AAAA"), raw(2, "BBBB")],
+            outcomes: [
+                1: .failure(.unexpectedProbe),
+                2: .success(facts(udid: "BBBB", name: "Chosen")),
+            ]
+        )
+        let result = try LocalDeviceQueries(
+            discovery: USBDeviceDiscovery(factsProvider: provider)
+        ).deviceStatus(canonicalUDID: try CanonicalUDID(canonicalString: "BBBB"))
+
+        XCTAssertEqual(result.canonicalUDID.rawValue, "BBBB")
+        XCTAssertEqual(provider.probedDeviceIDs, [2])
+    }
+
     func testStatusConditionProjectionDoesNotConsultRuntime() throws {
         let cases: [(LocalDeviceCondition, DeviceStatusCondition)] = [
             (.init(connected: false, locked: false, trusted: false), .disconnected),
@@ -256,7 +288,7 @@ private final class RecordingFactsProvider: LocalDeviceFactsProviding,
     @unchecked Sendable
 {
     private let rawDevices: [RawDiscoveredDevice]
-    private let results: [UInt64: LocalDeviceFactsResult]
+    private let outcomes: [UInt64: Result<LocalDeviceFactsResult, RecordingFactsProviderError>]
     private(set) var probedDeviceIDs = [UInt64]()
 
     init(
@@ -264,7 +296,15 @@ private final class RecordingFactsProvider: LocalDeviceFactsProviding,
         results: [UInt64: LocalDeviceFactsResult]
     ) {
         self.rawDevices = rawDevices
-        self.results = results
+        self.outcomes = results.mapValues(Result.success)
+    }
+
+    init(
+        rawDevices: [RawDiscoveredDevice],
+        outcomes: [UInt64: Result<LocalDeviceFactsResult, RecordingFactsProviderError>]
+    ) {
+        self.rawDevices = rawDevices
+        self.outcomes = outcomes
     }
 
     func enumerate() throws -> RawDiscoverySnapshot {
@@ -279,6 +319,10 @@ private final class RecordingFactsProvider: LocalDeviceFactsProviding,
         rawTransportUDID: String
     ) throws -> LocalDeviceFactsResult {
         probedDeviceIDs.append(deviceID)
-        return try XCTUnwrap(results[deviceID])
+        return try XCTUnwrap(outcomes[deviceID]).get()
     }
+}
+
+private enum RecordingFactsProviderError: Error {
+    case unexpectedProbe
 }
