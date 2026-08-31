@@ -625,13 +625,13 @@ realtime Stream needs loading capability
 finite command由权威CandidatePlan派生`epochBound` start-only demand；它返回 `capabilityPreparing` remediation，原命令没有 accepted boundary。`live` launcher 在 GUIHost/Resolver 前以 `startOnly` mode 调用 control；未 ready 时不创建 live owner。USB detach终止所有epoch-bound demand；不存在跨连接保留的 live prewarm。
 
 Runtime generation restart 后，新的 Coordinator 从空 capability projection 开始，且它的 `connectionEpoch` 不得被误解为旧进程的
-epoch。iOS 17+ current connected target 只有在读取到此前完整 preparation 成功留下的、UDID hash + product/build/group 精确匹配的
-非权威 eligibility receipt 时，才可在创建 start-only demand 前执行一次 bounded `queryMounted -> required-service warm`
-rehydration：只有 mounted fact 与 warm terminal 均成功，才在新 Coordinator 标记该 group ready 并继续本次 admission。receipt
-不单独表达 readiness；此路径不下载/TSS/mount，不进入 PreparationAttempt，不产生 original-command accepted boundary，也不重放
-命令；任何 receipt mismatch、未mounted、typed failure、timeout 或 protocol failure 都保持 unready 并走既有 start-only demand +
-`capabilityPreparing` remediation。物理 detach/reconnect 仍一律清除当前 projection，不得通过该规则复用旧 Helper、tunnel、
-service 或 command。
+epoch。对已确定的 current connected target，可在创建 start-only demand 前执行一次 bounded
+`queryMounted -> required-service warm` rehydration：只有 mounted fact 与 warm terminal 均成功，才在新 Coordinator
+标记该 group ready 并继续本次 admission。eligibility receipt 仅记录历史成功资格，不是当前 readiness 的硬门槛，也不单独
+表达 readiness；此路径不下载/TSS/mount，不进入 PreparationAttempt，不产生 original-command accepted boundary，也不重放命令。
+未mounted、状态查询失败、service warm 失败、timeout、protocol failure 或 epoch 变化都保持 unready，返回带具体 reason 的
+`capabilityPreparing` remediation，原命令不执行。物理 detach/reconnect 仍一律清除当前 projection，不得通过该规则复用旧
+Helper、tunnel、service 或 command。
 
 所有准备 phase deadline、显式 prepare Runtime-terminal wait、detach/reconnect 和 observer terminal 规则见 TRD 03 第 18 节；不存在统一 10 秒 preparation deadline。
 

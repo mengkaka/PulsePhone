@@ -39,6 +39,29 @@ public enum ProductionRuntimeBackendDisposition: Sendable {
     case succeeded(value: RepositoryJSONObject)
 }
 
+private enum PreparationReadinessRecoveryResult: Equatable, Sendable {
+    case ready
+    case notMounted
+    case mountedStateCheckFailed
+    case serviceWarmupFailed
+    case staleConnection
+
+    var reason: String {
+        switch self {
+        case .ready:
+            return "runDevicePrepare"
+        case .notMounted:
+            return "developerSupportNotMounted"
+        case .mountedStateCheckFailed:
+            return "mountedStateCheckFailed"
+        case .serviceWarmupFailed:
+            return "serviceWarmupFailed"
+        case .staleConnection:
+            return "connectionEpochChanged"
+        }
+    }
+}
+
 private final class ProductionPreparationProgressPublisher: @unchecked Sendable {
     private let attemptID: CanonicalUUID
     private let groupID: String
@@ -2891,27 +2914,31 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             return nil
         }
 
-        if restoreCurrentModernPreparationReadinessIfEligible(
-            actionID: actionID,
-            coordinator: coordinator,
-            developerImageStore: developerImageStore,
-            device: device,
-            groupID: route.preparationGroupID,
-            helperExecutor: helperExecutor,
-            snapshot: snapshot
-        ) {
-            return nil
+        let recoveryResult: PreparationReadinessRecoveryResult
+        switch route.route {
+        case .personalized:
+            recoveryResult = restoreCurrentModernPreparationReadinessIfEligible(
+                actionID: actionID,
+                coordinator: coordinator,
+                device: device,
+                groupID: route.preparationGroupID,
+                helperExecutor: helperExecutor,
+                snapshot: snapshot
+            )
+        case .classic:
+            recoveryResult = restoreCurrentClassicPreparationReadinessIfEligible(
+                actionID: actionID,
+                coordinator: coordinator,
+                dynamicDeveloperImageCatalogStore: dynamicDeveloperImageCatalogStore,
+                device: device,
+                groupID: route.preparationGroupID,
+                directHelperExecutor: directHelperExecutor,
+                snapshot: snapshot
+            )
+        case .none:
+            recoveryResult = .mountedStateCheckFailed
         }
-        if restoreCurrentClassicPreparationReadinessIfEligible(
-            actionID: actionID,
-            coordinator: coordinator,
-            developerImageStore: developerImageStore,
-            dynamicDeveloperImageCatalogStore: dynamicDeveloperImageCatalogStore,
-            device: device,
-            groupID: route.preparationGroupID,
-            directHelperExecutor: directHelperExecutor,
-            snapshot: snapshot
-        ) {
+        if recoveryResult == .ready {
             return nil
         }
 
@@ -2935,7 +2962,8 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                 code: "capabilityPreparing",
                 details: try preparationRemediationDetails(
                     coordinator: coordinator,
-                    groupID: route.preparationGroupID
+                    groupID: route.preparationGroupID,
+                    reason: recoveryResult.reason
                 )
             )
         }
@@ -2969,7 +2997,8 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             code: "capabilityPreparing",
             details: try preparationRemediationDetails(
                 coordinator: coordinator,
-                groupID: route.preparationGroupID
+                groupID: route.preparationGroupID,
+                reason: recoveryResult.reason
             )
         )
     }
@@ -3002,24 +3031,37 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             let actionID = request.body["actionContext"]?.objectValue
                 .flatMap { canonicalUUID($0["actionID"]) }
                 ?? CanonicalUUID(value: UUID())
-            if restoreCurrentModernPreparationReadinessIfEligible(
-                actionID: actionID,
-                coordinator: coordinator,
-                developerImageStore: developerImageStore,
-                device: device,
-                groupID: groupID,
-                helperExecutor: helperExecutor,
-                snapshot: snapshot
-            ) || restoreCurrentClassicPreparationReadinessIfEligible(
-                actionID: actionID,
-                coordinator: coordinator,
-                developerImageStore: developerImageStore,
-                dynamicDeveloperImageCatalogStore: dynamicDeveloperImageCatalogStore,
-                device: device,
-                groupID: groupID,
-                directHelperExecutor: directHelperExecutor,
-                snapshot: snapshot
-            ) {
+            let recovery: PreparationReadinessRecoveryResult
+            let osMajor = UInt64(
+                device.facts.productVersion.split(separator: ".").first ?? ""
+            )
+            let route = try? coordinator.developerSupportRoute(
+                osMajor: osMajor ?? 0
+            )
+            switch route?.route {
+            case .personalized:
+                recovery = restoreCurrentModernPreparationReadinessIfEligible(
+                    actionID: actionID,
+                    coordinator: coordinator,
+                    device: device,
+                    groupID: groupID,
+                    helperExecutor: helperExecutor,
+                    snapshot: snapshot
+                )
+            case .classic:
+                recovery = restoreCurrentClassicPreparationReadinessIfEligible(
+                    actionID: actionID,
+                    coordinator: coordinator,
+                    dynamicDeveloperImageCatalogStore: dynamicDeveloperImageCatalogStore,
+                    device: device,
+                    groupID: groupID,
+                    directHelperExecutor: directHelperExecutor,
+                    snapshot: snapshot
+                )
+            default:
+                recovery = .mountedStateCheckFailed
+            }
+            if recovery == .ready {
                 return .succeeded(
                     value: try object([
                         ("disposition", .string("alreadyReady")),
@@ -3065,7 +3107,8 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                 code: "capabilityPreparing",
                 details: try preparationRemediationDetails(
                     coordinator: coordinator,
-                    groupID: groupID
+                    groupID: groupID,
+                    reason: "runDevicePrepare"
                 )
             )
         }
@@ -3099,7 +3142,8 @@ public struct ProductionRuntimeOperationBackend: Sendable {
 
     private static func preparationRemediationDetails(
         coordinator: ProductionRuntimeDeviceCoordinator,
-        groupID: String
+        groupID: String,
+        reason: String = "runDevicePrepare"
     ) throws -> RepositoryJSONObject {
         try object([
             (
@@ -3109,7 +3153,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                     .first ?? "developer-support")
             ),
             ("preparationGroup", .string(groupID)),
-            ("reason", .string("runDevicePrepare")),
+            ("reason", .string(reason)),
             ("remediation", .string("runDevicePrepare")),
             ("state", .string("preparingDevice")),
         ])
@@ -3209,16 +3253,36 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         progress: progress
       )
       if case .succeeded = result {
-        _ = try coordinator.markPreparationReady(
+        let marked = try coordinator.markPreparationReady(
           groupID: groupID,
           connectionEpoch: snapshot.connectionEpoch
         )
+        guard coordinator.isPreparationReady(
+          groupID: groupID,
+          snapshot: marked
+        ) else {
+          return .failedWithDetails(
+            code: "preparationFailed",
+            details: try developerSupportDetails(
+              groupID: groupID,
+              phase: "markingReady"
+            )
+          )
+        }
         if route.route == .classic {
-          recordClassicPreparationRehydrationEligibility(
+          guard recordClassicPreparationRehydrationEligibility(
             developerImageStore: developerImageStore,
             device: device,
             groupID: groupID
-          )
+          ) else {
+            return .failedWithDetails(
+              code: "developerSupportUnavailable",
+              details: try developerSupportDetails(
+                groupID: groupID,
+                phase: "persistingReadiness"
+              )
+            )
+          }
         }
       }
       return result
@@ -3250,11 +3314,36 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                     selectedXcodeSnapshotProvider: selectedXcodeSnapshotProvider
                 )
                 if case .succeeded = result {
-                    _ = try coordinator.markPreparationReady(
+                    let marked = try coordinator.markPreparationReady(
                         groupID: groupID,
             connectionEpoch: snapshot.connectionEpoch
           )
-        }
+                    guard coordinator.isPreparationReady(
+                        groupID: groupID,
+                        snapshot: marked
+                    ) else {
+                        return .failedWithDetails(
+                            code: "preparationFailed",
+                            details: try developerSupportDetails(
+                                groupID: groupID,
+                                phase: "markingReady"
+                            )
+                        )
+                    }
+                    guard recordClassicPreparationRehydrationEligibility(
+                        developerImageStore: developerImageStore,
+                        device: device,
+                        groupID: groupID
+                    ) else {
+                        return .failedWithDetails(
+                            code: "developerSupportUnavailable",
+                            details: try developerSupportDetails(
+                                groupID: groupID,
+                                phase: "persistingReadiness"
+                            )
+                        )
+                    }
+                }
         return result
       } catch ProductionCoreDeviceHelperExecutorError.timedOut {
         return .failedWithDetails(
@@ -3299,15 +3388,35 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         selectedXcodeSnapshotProvider: selectedXcodeSnapshotProvider
       )
       if case .succeeded = result {
-        _ = try coordinator.markPreparationReady(
+        let marked = try coordinator.markPreparationReady(
           groupID: groupID,
           connectionEpoch: snapshot.connectionEpoch
         )
-        recordModernPreparationRehydrationEligibility(
+        guard coordinator.isPreparationReady(
+          groupID: groupID,
+          snapshot: marked
+        ) else {
+          return .failedWithDetails(
+            code: "preparationFailed",
+            details: try developerSupportDetails(
+              groupID: groupID,
+              phase: "markingReady"
+            )
+          )
+        }
+        guard recordModernPreparationRehydrationEligibility(
           developerImageStore: developerImageStore,
           device: device,
           groupID: groupID
-        )
+        ) else {
+          return .failedWithDetails(
+            code: "developerSupportUnavailable",
+            details: try developerSupportDetails(
+              groupID: groupID,
+              phase: "persistingReadiness"
+            )
+          )
+        }
       }
       return result
     case .none:
@@ -4094,26 +4203,18 @@ public struct ProductionRuntimeOperationBackend: Sendable {
     private static func restoreCurrentModernPreparationReadinessIfEligible(
         actionID: CanonicalUUID,
         coordinator: ProductionRuntimeDeviceCoordinator,
-        developerImageStore: DeveloperImageAssetStore?,
         device: ProductionRuntimeDeviceObservation,
         groupID: String,
         helperExecutor: ProductionCoreDeviceHelperExecutor,
         snapshot: ProductionRuntimeDeviceSnapshot
-    ) -> Bool {
-        guard let developerImageStore,
-              let receipt = preparationRehydrationEligibility(
-                  device: device,
-                  groupID: groupID
-              ),
-              (try? developerImageStore
-                  .hasPreparationRehydrationEligibility(receipt)) == true,
-              let osMajor = UInt64(
+    ) -> PreparationReadinessRecoveryResult {
+        guard let osMajor = UInt64(
                   device.facts.productVersion.split(separator: ".").first ?? ""
               ),
               let route = try? coordinator.developerSupportRoute(osMajor: osMajor),
               route.route == .personalized
         else {
-            return false
+            return .mountedStateCheckFailed
         }
 
         do {
@@ -4123,10 +4224,11 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                 connectionEpoch: snapshot.connectionEpoch,
                 helperExecutor: helperExecutor
             )
-            guard query["outcome"]?.stringValue == "succeeded",
-                  case .bool(true)? = query["value"]?.objectValue?["mounted"]
-            else {
-                return false
+            guard query["outcome"]?.stringValue == "succeeded" else {
+                return .mountedStateCheckFailed
+            }
+            guard case .bool(true)? = query["value"]?.objectValue?["mounted"] else {
+                return .notMounted
             }
             let warm = try helperExecutor.warmGeneration(
                 requestID: CanonicalUUID(value: UUID()),
@@ -4141,13 +4243,13 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                   warmValue["executorGeneration"]?.numberValue
                     .flatMap({ try? $0.requireUInt64() }) != nil
             else {
-                return false
+                return .serviceWarmupFailed
             }
             let current = try coordinator.commandAdmissionSnapshot()
             guard current.connectionEpoch == snapshot.connectionEpoch,
                   current.device == device
             else {
-                return false
+                return .staleConnection
             }
             _ = try coordinator.markPreparationReady(
                 groupID: groupID,
@@ -4159,12 +4261,18 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             return coordinator.isPreparationReady(
                 groupID: groupID,
                 snapshot: try coordinator.commandAdmissionSnapshot()
-            )
+            ) ? .ready : .staleConnection
+        } catch ProductionRuntimeDeviceCoordinatorError.stalePreparationState {
+            return .staleConnection
+        } catch ProductionCoreDeviceHelperExecutorError.timedOut {
+            return .serviceWarmupFailed
+        } catch ProductionCoreDeviceHelperExecutorError.helperUnavailableBeforeRequest {
+            return .serviceWarmupFailed
         } catch {
             developerSupportLogger.notice(
                 "stage=rehydrateCurrentGeneration outcome=failed preparationGroupID=\(groupID, privacy: .public)"
             )
-            return false
+            return .mountedStateCheckFailed
         }
     }
 
@@ -4174,29 +4282,21 @@ public struct ProductionRuntimeOperationBackend: Sendable {
     private static func restoreCurrentClassicPreparationReadinessIfEligible(
         actionID: CanonicalUUID,
         coordinator: ProductionRuntimeDeviceCoordinator,
-        developerImageStore: DeveloperImageAssetStore?,
         dynamicDeveloperImageCatalogStore: DynamicDeveloperImageCatalogStore?,
         device: ProductionRuntimeDeviceObservation,
         groupID: String,
         directHelperExecutor: ProductionCoreDeviceHelperExecutor?,
         snapshot: ProductionRuntimeDeviceSnapshot
-    ) -> Bool {
-        guard let developerImageStore,
-              let dynamicDeveloperImageCatalogStore,
+    ) -> PreparationReadinessRecoveryResult {
+        guard let dynamicDeveloperImageCatalogStore,
               let directHelperExecutor,
-              let receipt = preparationRehydrationEligibility(
-                  device: device,
-                  groupID: groupID
-              ),
-              (try? developerImageStore
-                  .hasPreparationRehydrationEligibility(receipt)) == true,
               let osMajor = UInt64(
                   device.facts.productVersion.split(separator: ".").first ?? ""
               ),
               let route = try? coordinator.developerSupportRoute(osMajor: osMajor),
               route.route == .classic
         else {
-            return false
+            return .mountedStateCheckFailed
         }
 
         do {
@@ -4205,7 +4305,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                 in: catalogSnapshot.catalog,
                 iosVersion: device.facts.productVersion
             ) else {
-                return false
+                return .serviceWarmupFailed
             }
             let query = try directHelperExecutor.executeOneShot(
                 requestID: CanonicalUUID(value: UUID()),
@@ -4216,10 +4316,11 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                 device: device,
                 connectionEpoch: snapshot.connectionEpoch
             )
-            guard query["outcome"]?.stringValue == "succeeded",
-                  case .bool(true)? = query["value"]?.objectValue?["mounted"]
-            else {
-                return false
+            guard query["outcome"]?.stringValue == "succeeded" else {
+                return .mountedStateCheckFailed
+            }
+            guard case .bool(true)? = query["value"]?.objectValue?["mounted"] else {
+                return .notMounted
             }
             let payload = try ClassicHelperRequestFactory.make(
                 operation: .probeServices,
@@ -4238,13 +4339,13 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                 connectionEpoch: snapshot.connectionEpoch
             )
             guard probe["outcome"]?.stringValue == "succeeded" else {
-                return false
+                return .serviceWarmupFailed
             }
             let current = try coordinator.commandAdmissionSnapshot()
             guard current.connectionEpoch == snapshot.connectionEpoch,
                   current.device == device
             else {
-                return false
+                return .staleConnection
             }
             _ = try coordinator.markPreparationReady(
                 groupID: groupID,
@@ -4256,12 +4357,18 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             return coordinator.isPreparationReady(
                 groupID: groupID,
                 snapshot: try coordinator.commandAdmissionSnapshot()
-            )
+            ) ? .ready : .staleConnection
+        } catch ProductionRuntimeDeviceCoordinatorError.stalePreparationState {
+            return .staleConnection
+        } catch ProductionCoreDeviceHelperExecutorError.timedOut {
+            return .serviceWarmupFailed
+        } catch ProductionCoreDeviceHelperExecutorError.helperUnavailableBeforeRequest {
+            return .serviceWarmupFailed
         } catch {
             developerSupportLogger.notice(
                 "stage=rehydrateCurrentClassicReadiness outcome=failed preparationGroupID=\(groupID, privacy: .public)"
             )
-            return false
+            return .mountedStateCheckFailed
         }
     }
 
@@ -4269,7 +4376,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         developerImageStore: DeveloperImageAssetStore?,
         device: ProductionRuntimeDeviceObservation,
         groupID: String
-    ) {
+    ) -> Bool {
         recordPreparationRehydrationEligibility(
             developerImageStore: developerImageStore,
             device: device,
@@ -4281,7 +4388,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         developerImageStore: DeveloperImageAssetStore?,
         device: ProductionRuntimeDeviceObservation,
         groupID: String
-    ) {
+    ) -> Bool {
         recordPreparationRehydrationEligibility(
             developerImageStore: developerImageStore,
             device: device,
@@ -4293,23 +4400,28 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         developerImageStore: DeveloperImageAssetStore?,
         device: ProductionRuntimeDeviceObservation,
         groupID: String
-    ) {
-        guard let developerImageStore,
-              let receipt = preparationRehydrationEligibility(
-                  device: device,
-                  groupID: groupID
-              )
-        else {
-            return
+    ) -> Bool {
+        guard let developerImageStore else {
+            // Persistence is optional in test/minimal assemblies; readiness is
+            // still valid for the current Runtime and connection epoch.
+            return true
+        }
+        guard let receipt = preparationRehydrationEligibility(
+            device: device,
+            groupID: groupID
+        ) else {
+            return false
         }
         do {
             try developerImageStore.recordPreparationRehydrationEligibility(
                 receipt
             )
+            return true
         } catch {
             developerSupportLogger.error(
                 "stage=recordRehydrationEligibility outcome=failed preparationGroupID=\(groupID, privacy: .public)"
             )
+            return false
         }
     }
 

@@ -1864,7 +1864,17 @@ public struct PulsePhoneCLIProcess: Sendable {
         if code == "capabilityPreparing",
            details?["remediation"] == "runDevicePrepare"
         {
-            renderedMessage = "Developer support preparation is in progress. Run PulsePhone device prepare to follow progress."
+            let reason = details?["reason"]
+            switch reason {
+            case "developerSupportNotMounted":
+                renderedMessage = "Developer Support is not mounted on the target device. Run PulsePhone device prepare, then retry the command. The command was not executed."
+            case "serviceWarmupFailed":
+                renderedMessage = "Developer Support is mounted, but the required device service is unavailable. Run PulsePhone device prepare, then retry the command. The command was not executed."
+            case "mountedStateCheckFailed", "connectionEpochChanged":
+                renderedMessage = "Developer Support readiness could not be verified for the current device connection. Run PulsePhone device prepare, then retry the command. The command was not executed."
+            default:
+                renderedMessage = "Developer Support preparation is required. Run PulsePhone device prepare, then retry the command. The command was not executed."
+            }
         } else {
             renderedMessage = message
         }

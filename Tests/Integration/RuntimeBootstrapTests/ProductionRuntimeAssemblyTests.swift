@@ -4356,49 +4356,8 @@ final class ProductionRuntimeAssemblyTests: XCTestCase {
             developerImageStore: store,
             preparationJobs: preparationJobs
         )
-        guard case .failedWithDetails(let code, let details) = result else {
-            return XCTFail("expected preparation remediation")
-        }
-        XCTAssertEqual(code, "capabilityPreparing")
-        XCTAssertEqual(details["remediation"]?.stringValue, "runDevicePrepare")
-        XCTAssertFalse(context.buttonHomeObserved())
-
-        try context.waitForWarmGeneration()
-        try waitForCondition {
-            let snapshot = try? coordinator.commandAdmissionSnapshot()
-            guard let snapshot else { return false }
-            if case .available? = snapshot.planningContext.capabilities[
-                "coredevice.input"
-            ] {
-                return true
-            }
-            return false
-        }
-
-        let ready = try coordinator.commandAdmissionSnapshot()
-    guard
-      case .available? = ready.planningContext.capabilities[
-            "coredevice.input"
-      ]
-    else {
-            return XCTFail("successful preparation did not advance capability state")
-        }
-        XCTAssertFalse(context.buttonHomeObserved())
-
-        let retry = try ProductionRuntimeOperationBackend.executeCommand(
-            request,
-            coordinator: coordinator,
-            helperExecutor: context.executor,
-            directHelperExecutor: context.directExecutor,
-            screenshotStore: screenshotStore,
-            clientInstanceID: nil,
-            pointerObservationSink: ProductionRuntimePointerObservationSink(),
-            developerImageCatalog: catalog,
-            developerImageStore: store,
-            preparationJobs: preparationJobs
-        )
-        guard case .standard(let value) = retry else {
-            return XCTFail("expected explicitly retried button command to execute")
+        guard case .standard(let value) = result else {
+            return XCTFail("mounted and warm Developer Support should recover and execute: \(result)")
         }
         XCTAssertEqual(value["outcome"]?.stringValue, "succeeded")
         XCTAssertTrue(context.buttonHomeObserved())
@@ -4742,6 +4701,10 @@ final class ProductionRuntimeAssemblyTests: XCTestCase {
         }
         XCTAssertEqual(code, "capabilityPreparing")
         XCTAssertEqual(details["remediation"]?.stringValue, "runDevicePrepare")
+        XCTAssertEqual(
+            details["reason"]?.stringValue,
+            "developerSupportNotMounted"
+        )
         XCTAssertFalse(context.buttonHomeObserved())
     }
 
@@ -4848,44 +4811,11 @@ final class ProductionRuntimeAssemblyTests: XCTestCase {
             screenshotDetails["remediation"]?.stringValue,
             "runDevicePrepare"
         )
-        try context.waitForWarmGeneration()
-
-        let element = try execute(
-            commandID: "element.snapshot",
-            arguments: [("format", .string("json"))]
-        )
-        guard case .failedWithDetails(let elementCode, let elementDetails) = element
-        else {
-            return XCTFail("expected element preparation remediation: \(element)")
-        }
-        XCTAssertEqual(elementCode, "capabilityPreparing")
         XCTAssertEqual(
-            elementDetails["remediation"]?.stringValue,
-            "runDevicePrepare"
+            screenshotDetails["reason"]?.stringValue,
+            "serviceWarmupFailed"
         )
         XCTAssertEqual(analyzerCalls.value, 0)
-
-        context.releaseBlockedOneShot()
-        try waitForCondition {
-            let snapshot = try? coordinator.commandAdmissionSnapshot()
-            guard let snapshot else { return false }
-            if case .available? = snapshot.planningContext.capabilities[
-                "coredevice.screenshot"
-            ] {
-                return true
-            }
-            return false
-        }
-        XCTAssertEqual(analyzerCalls.value, 0)
-
-    guard
-      case .artifact = try execute(
-            commandID: "screenshot.cli",
-            arguments: [("outputPath", .string("/tmp/capture.png"))]
-      )
-    else {
-            return XCTFail("manual screenshot retry must execute after preparation")
-        }
     }
 
     func testModernTouchCommandStartsPreparationBeforeGeometryQuery() throws {
@@ -4947,13 +4877,12 @@ final class ProductionRuntimeAssemblyTests: XCTestCase {
             developerImageStore: store,
             preparationJobs: ProductionPreparationJobManager()
         )
-        guard case .failedWithDetails(let code, let details) = result else {
+        guard case .standard(let value) = result else {
             return XCTFail(
-                "expected touch preparation remediation before geometry query: \(result)"
+                "mounted and warm Developer Support should execute touch command: \(result)"
             )
         }
-        XCTAssertEqual(code, "capabilityPreparing")
-        XCTAssertEqual(details["remediation"]?.stringValue, "runDevicePrepare")
+        XCTAssertEqual(value["outcome"]?.stringValue, "succeeded")
     }
 
     func testModernPreparationReusesMountedSupportBeforeCatalogResolution() throws {
@@ -5384,11 +5313,10 @@ final class ProductionRuntimeAssemblyTests: XCTestCase {
             developerImageStore: store,
             preparationJobs: ProductionPreparationJobManager()
         )
-        guard case .failedWithDetails(let code, let details) = result else {
-            return XCTFail("expected stream preparation remediation: \(result)")
+        guard case .succeeded(let value) = result else {
+            return XCTFail("mounted and warm Developer Support should open keyboard stream: \(result)")
         }
-        XCTAssertEqual(code, "capabilityPreparing")
-        XCTAssertEqual(details["remediation"]?.stringValue, "runDevicePrepare")
+        XCTAssertNotNil(value["executorGeneration"])
     }
 
     func testModernPointerStreamStartsPreparationBeforeGeometryQuery() throws {
@@ -5458,11 +5386,10 @@ final class ProductionRuntimeAssemblyTests: XCTestCase {
             developerImageStore: store,
             preparationJobs: ProductionPreparationJobManager()
         )
-        guard case .failedWithDetails(let code, let details) = result else {
-            return XCTFail("expected pointer preparation remediation: \(result)")
+        guard case .succeeded(let value) = result else {
+            return XCTFail("mounted and warm Developer Support should open pointer stream: \(result)")
         }
-        XCTAssertEqual(code, "capabilityPreparing")
-        XCTAssertEqual(details["remediation"]?.stringValue, "runDevicePrepare")
+        XCTAssertNotNil(value["executorGeneration"])
     }
 
     func testLiveCommandAdmissionReusesCurrentSnapshot() throws {

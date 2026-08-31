@@ -1046,9 +1046,9 @@ explicit
 
 DDI-dependent command or live launch
   capability not ready
-  -> start or join the same Runtime-owned preparation job
-  -> immediately return typed remediation: Developer support preparation is in progress. Run PulsePhone device prepare to follow progress.
-  -> do not wait and do not automatically resume the original command/window launch
+  -> verify current device state with bounded queryMounted + required-service warm
+  -> if both succeed, mark this Runtime ready and continue the command
+  -> otherwise return capabilityPreparing remediation with a concrete reason; do not execute the command
 ```
 
 Runtime 启动、USB attach、`devices`、`device info`、`status`、install 和 uninstall 不无条件触发 Developer Support 下载或 tunnel。
@@ -1119,10 +1119,10 @@ DDI 时返回 `matchingDDIUnavailable`，不得猜测其他版本；iOS 17+ defa
 - USB detach终止旧连接代的显式prepare observer、start-only demand和设备侧准备；host download可以继续。
 - reconnect永不复用旧Helper/tunnel/service，也不重放旧命令；准备必须由reconnect后的新显式或start-only请求触发。
 - Runtime process restart 不等同于物理 USB reconnect：新 Runtime 不得继承旧进程的 ready bit、Helper/tunnel 或 connection epoch。
-  iOS 17+ 路径只可读取此前完整 preparation 成功写入的、UDID 哈希化且精确绑定 product/build/group 的非权威 eligibility receipt，
-  以决定是否尝试一次有界 `queryMounted + required-service warm`；两者都成功后才恢复当前 Runtime generation 的 ready projection。
-  receipt 不是 device readiness 证据，且 rehydration 不下载、TSS、mount、排队或重放原 command；receipt 不匹配、query 未确认
-  mounted、warm 失败或超时均不得放行，必须继续现有 start-only preparation/remediation 合同。
+  对已确定的 current connected target，可尝试一次有界 `queryMounted + required-service warm`；两者都成功后才恢复当前 Runtime
+  generation 的 ready projection。非权威 eligibility receipt 仅记录历史成功资格，不是当前 readiness 的硬门槛。
+  rehydration 不下载、TSS、mount、排队或重放原 command；未mounted、状态查询失败、service warm 失败或超时均不得放行，
+  必须返回带具体 reason 的 `capabilityPreparing` remediation，并丢弃原命令。
 - PulsePhone 第一阶段永不自动 unmount，避免破坏其他工具共享的 developer environment。
 
 ### 10.6 成功与发布边界

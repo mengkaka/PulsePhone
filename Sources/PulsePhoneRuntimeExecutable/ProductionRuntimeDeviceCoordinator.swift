@@ -13,6 +13,12 @@ public enum ProductionRuntimeDeviceCoordinatorError: Error, Equatable, Sendable 
     case invalidBundledResources
     case invalidProductVersion
     case screenshotUnavailable(String)
+    case stalePreparationState(
+        groupID: String,
+        expectedConnectionEpoch: UInt64,
+        currentConnectionEpoch: UInt64
+    )
+    case unknownPreparationGroup(String)
 }
 
 public struct ProductionRuntimeDeviceFacts: Equatable, Sendable {
@@ -705,12 +711,18 @@ public final class ProductionRuntimeDeviceCoordinator: @unchecked Sendable {
     ) throws -> ProductionRuntimeDeviceSnapshot {
         lock.lock()
         defer { lock.unlock() }
-        guard connectionEpoch == state.connectionEpoch,
-              catalog.preparationGroups.contains(where: {
-                  $0.preparationGroupID == groupID
-              })
-        else {
-            return try snapshotLocked()
+        guard catalog.preparationGroups.contains(where: {
+            $0.preparationGroupID == groupID
+        }) else {
+            throw ProductionRuntimeDeviceCoordinatorError
+                .unknownPreparationGroup(groupID)
+        }
+        guard connectionEpoch == state.connectionEpoch else {
+            throw ProductionRuntimeDeviceCoordinatorError.stalePreparationState(
+                groupID: groupID,
+                expectedConnectionEpoch: connectionEpoch,
+                currentConnectionEpoch: state.connectionEpoch
+            )
         }
         if state.readyPreparationGroupIDs.insert(groupID).inserted {
             state.capabilityRevision = increment(state.capabilityRevision)

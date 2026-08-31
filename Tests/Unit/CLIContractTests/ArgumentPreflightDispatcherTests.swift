@@ -641,7 +641,7 @@ final class ArgumentPreflightDispatcherTests: XCTestCase {
         XCTAssertEqual(human.exitCode, 5)
         XCTAssertEqual(
             human.chunk.stderr,
-            ["capabilityPreparing: Developer support preparation is in progress. Run PulsePhone device prepare to follow progress."]
+            ["capabilityPreparing: Developer Support preparation is required. Run PulsePhone device prepare, then retry the command. The command was not executed."]
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: outputPath))
 
@@ -1061,7 +1061,7 @@ final class ArgumentPreflightDispatcherTests: XCTestCase {
         XCTAssertEqual(human.exitCode, 5)
         XCTAssertEqual(
             human.chunk.stderr,
-            ["capabilityPreparing: Developer support preparation is in progress. Run PulsePhone device prepare to follow progress."]
+            ["capabilityPreparing: Developer Support preparation is required. Run PulsePhone device prepare, then retry the command. The command was not executed."]
         )
         XCTAssertTrue(recorder.targets.isEmpty)
 
