@@ -45,10 +45,6 @@ private enum ProductionBoundVideoStopPresentation {
     case freezeIfAvailable(reason: LiveWindowPlaceholderReason)
 }
 
-private enum ProductionGUIHostWakeProbeError: Error {
-    case controllerUnavailable
-}
-
 public final class ProductionGUIHostWindowController:
     NSObject,
     NSWindowDelegate,
@@ -191,16 +187,43 @@ public final class ProductionGUIHostWindowController:
         },
         targetHomeAction: { [weak self] target in
             guard let self else {
-                throw ProductionGUIHostWakeProbeError.controllerUnavailable
+                return .failed(code: "internalFailure")
             }
-            let session = try self.runtimeSessionFactory(target)
-            defer { try? session.close() }
-            _ = try session.prepareCapabilities()
-            _ = try session.submit(
-                commandID: "button.home",
-                rawArguments: [:],
-                actionID: CanonicalUUID(value: UUID())
-            )
+            do {
+                let session = try self.runtimeSessionFactory(target)
+                defer { try? session.close() }
+                let result = try session.submit(
+                    commandID: "button.home",
+                    rawArguments: [:],
+                    actionID: CanonicalUUID(value: UUID())
+                )
+                guard result["outcome"]?.stringValue != "succeeded" else {
+                    return .sent
+                }
+                let error = result["error"]?.objectValue
+                if error?["code"]?.stringValue == "capabilityPreparing",
+                   error?["details"]?.objectValue?["remediation"]?.stringValue
+                    == "runDevicePrepare"
+                {
+                    return .requiresPreparation
+                }
+                return .failed(
+                    code: error?["code"]?.stringValue ?? "outcomeUnknown"
+                )
+            } catch {
+                return .failed(code: Self.runtimeClientErrorCode(error))
+            }
+        },
+        targetPrepareAction: { [weak self] target in
+            guard let self else { return .failed(code: "internalFailure") }
+            do {
+                let session = try self.runtimeSessionFactory(target)
+                defer { try? session.close() }
+                _ = try session.prepareCapabilities()
+                return .prepared
+            } catch {
+                return .failed(code: Self.runtimeClientErrorCode(error))
+            }
         }
     )
 

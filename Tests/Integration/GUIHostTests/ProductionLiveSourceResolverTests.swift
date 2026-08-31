@@ -985,6 +985,128 @@ final class ProductionLiveSourceResolverTests: XCTestCase {
     }
 
     @MainActor
+    func testWakeDeviceShowsForIOS17WithoutVideoSelectionAndReportsSuccess() async throws {
+        let fixture = try ResolverFixture(mapping: .missing)
+        let actions = ResolverWakeActionBox(
+            homeResults: [.sent],
+            prepareResults: []
+        )
+        let resolver = fixture.makeResolver(
+            targetHomeAction: actions.submitHome,
+            targetPrepareAction: actions.prepare,
+            videoAuthorizationStatus: { .denied }
+        )
+        resolver.apply(fixture.inventory)
+        resolver.openFirstOwner(
+            target: fixture.target,
+            ownerID: fixture.ownerID,
+            policy: .forceChooser
+        )
+
+        await assertEventually {
+            guard let button = self.wakeDeviceButton(
+                in: self.chooser(ownerID: fixture.ownerID)
+            ) else { return false }
+            return !button.isHidden && button.isEnabled
+        }
+        XCTAssertEqual(
+            candidateButton(in: chooser(ownerID: fixture.ownerID))?.state,
+            .off
+        )
+        wakeDeviceButton(in: chooser(ownerID: fixture.ownerID))?.performClick(nil)
+
+        await assertEventually {
+            self.wakeResultText(in: self.chooser(ownerID: fixture.ownerID))
+                == "已发送 Home"
+        }
+        let window = try XCTUnwrap(chooser(ownerID: fixture.ownerID))
+        let content = try XCTUnwrap(window.contentView)
+        content.layoutSubtreeIfNeeded()
+        let button = try XCTUnwrap(wakeDeviceButton(in: window))
+        let result = try XCTUnwrap(wakeResultLabel(in: window))
+        XCTAssertEqual(result.alignment, .right)
+        XCTAssertEqual(
+            result.convert(result.bounds, to: content).maxX,
+            button.convert(button.bounds, to: content).maxX,
+            accuracy: 2.5
+        )
+        XCTAssertEqual(actions.homeCount, 1)
+        XCTAssertEqual(actions.prepareCount, 0)
+        chooser(ownerID: fixture.ownerID)?.close()
+    }
+
+    @MainActor
+    func testWakeDevicePreparesOnceThenRetriesHome() async throws {
+        let fixture = try ResolverFixture(mapping: .missing)
+        let actions = ResolverWakeActionBox(
+            homeResults: [.requiresPreparation, .sent],
+            prepareResults: [.prepared]
+        )
+        let resolver = fixture.makeResolver(
+            targetHomeAction: actions.submitHome,
+            targetPrepareAction: actions.prepare
+        )
+        resolver.apply(fixture.inventory)
+        resolver.openFirstOwner(
+            target: fixture.target,
+            ownerID: fixture.ownerID,
+            policy: .forceChooser
+        )
+
+        await assertEventually {
+            self.wakeDeviceButton(in: self.chooser(ownerID: fixture.ownerID))?
+                .isEnabled == true
+        }
+        wakeDeviceButton(in: chooser(ownerID: fixture.ownerID))?.performClick(nil)
+
+        await assertEventually {
+            self.wakeResultText(in: self.chooser(ownerID: fixture.ownerID))
+                == "已发送 Home"
+        }
+        XCTAssertEqual(actions.homeCount, 2)
+        XCTAssertEqual(actions.prepareCount, 1)
+        chooser(ownerID: fixture.ownerID)?.close()
+    }
+
+    @MainActor
+    func testWakeDeviceCachesPrepareFailureForCurrentChooser() async throws {
+        let fixture = try ResolverFixture(mapping: .missing)
+        let actions = ResolverWakeActionBox(
+            homeResults: [.requiresPreparation],
+            prepareResults: [.failed(code: "serviceWarmupFailed")]
+        )
+        let resolver = fixture.makeResolver(
+            targetHomeAction: actions.submitHome,
+            targetPrepareAction: actions.prepare
+        )
+        resolver.apply(fixture.inventory)
+        resolver.openFirstOwner(
+            target: fixture.target,
+            ownerID: fixture.ownerID,
+            policy: .forceChooser
+        )
+
+        await assertEventually {
+            self.wakeDeviceButton(in: self.chooser(ownerID: fixture.ownerID))?
+                .isEnabled == true
+        }
+        wakeDeviceButton(in: chooser(ownerID: fixture.ownerID))?.performClick(nil)
+        let expected = "Developer Support 准备失败：serviceWarmupFailed"
+        await assertEventually {
+            self.wakeResultText(in: self.chooser(ownerID: fixture.ownerID))
+                == expected
+        }
+        wakeDeviceButton(in: chooser(ownerID: fixture.ownerID))?.performClick(nil)
+        XCTAssertEqual(
+            wakeResultText(in: chooser(ownerID: fixture.ownerID)),
+            "Developer Support 准备此前失败：serviceWarmupFailed"
+        )
+        XCTAssertEqual(actions.homeCount, 1)
+        XCTAssertEqual(actions.prepareCount, 1)
+        chooser(ownerID: fixture.ownerID)?.close()
+    }
+
+    @MainActor
     private func chooser(ownerID: String) -> NSWindow? {
         NSApplication.shared.windows.first { $0.identifier?.rawValue == ownerID }
     }
@@ -1043,6 +1165,27 @@ final class ProductionLiveSourceResolverTests: XCTestCase {
     }
 
     @MainActor
+    private func wakeDeviceButton(in window: NSWindow?) -> NSButton? {
+        buttons(in: window).first { $0.title == "唤醒设备" }
+    }
+
+    @MainActor
+    private func wakeResultText(in window: NSWindow?) -> String? {
+        wakeResultLabel(in: window)?.stringValue
+    }
+
+    @MainActor
+    private func wakeResultLabel(in window: NSWindow?) -> NSTextField? {
+        descendants(of: window?.contentView)
+            .compactMap { $0 as? NSTextField }
+            .first {
+                $0.stringValue == "已发送 Home"
+                    || $0.stringValue.hasPrefix("Developer Support 准备")
+                    || $0.stringValue.hasPrefix("未发送 Home：")
+            }
+    }
+
+    @MainActor
     private func buttons(in window: NSWindow?) -> [NSButton] {
         descendants(of: window?.contentView).compactMap { $0 as? NSButton }
     }
@@ -1092,6 +1235,47 @@ final class ProductionLiveSourceResolverTests: XCTestCase {
 
 private enum ResolverTestError: Error {
     case factsUnavailable
+}
+
+private final class ResolverWakeActionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var homeResults: [ProductionLiveSourceWakeActionResult]
+    private var prepareResults: [ProductionLiveSourcePrepareResult]
+    private var storedHomeCount = 0
+    private var storedPrepareCount = 0
+
+    init(
+        homeResults: [ProductionLiveSourceWakeActionResult],
+        prepareResults: [ProductionLiveSourcePrepareResult]
+    ) {
+        self.homeResults = homeResults
+        self.prepareResults = prepareResults
+    }
+
+    var homeCount: Int { lock.withLock { storedHomeCount } }
+    var prepareCount: Int { lock.withLock { storedPrepareCount } }
+
+    func submitHome(
+        _ target: CanonicalUDID
+    ) -> ProductionLiveSourceWakeActionResult {
+        lock.withLock {
+            storedHomeCount += 1
+            return homeResults.isEmpty
+                ? .failed(code: "internalFailure")
+                : homeResults.removeFirst()
+        }
+    }
+
+    func prepare(
+        _ target: CanonicalUDID
+    ) -> ProductionLiveSourcePrepareResult {
+        lock.withLock {
+            storedPrepareCount += 1
+            return prepareResults.isEmpty
+                ? .failed(code: "internalFailure")
+                : prepareResults.removeFirst()
+        }
+    }
 }
 
 @MainActor
@@ -1175,6 +1359,8 @@ private final class ResolverFixture: @unchecked Sendable {
         activeBindingsProvider: @escaping ProductionLiveSourceResolver.ActiveBindingsProvider = {
             []
         },
+        targetHomeAction: ProductionLiveSourceResolver.TargetHomeAction? = nil,
+        targetPrepareAction: ProductionLiveSourceResolver.TargetPrepareAction? = nil,
         inventoryRefresh: @escaping ProductionLiveSourceResolver.InventoryRefresh = { _ in },
         inventoryRefreshProvider: (@Sendable () throws -> VideoSourceInventory)? = nil,
         probeTimeout: DispatchTimeInterval = .milliseconds(100),
@@ -1216,6 +1402,8 @@ private final class ResolverFixture: @unchecked Sendable {
             ownerCancelled: ownerCancelled,
             fenceTargets: { _ in },
             activeBindingsProvider: activeBindingsProvider,
+            targetHomeAction: targetHomeAction,
+            targetPrepareAction: targetPrepareAction,
             captureFactory: capture.factory,
             inventoryRefreshProvider: inventoryRefreshProvider ?? { [inventory] in
                 inventory

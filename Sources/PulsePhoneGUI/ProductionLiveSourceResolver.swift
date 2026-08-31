@@ -51,6 +51,17 @@ struct ProductionLiveSourceCaptureHandle: @unchecked Sendable {
     }
 }
 
+enum ProductionLiveSourceWakeActionResult: Equatable, Sendable {
+    case sent
+    case requiresPreparation
+    case failed(code: String)
+}
+
+enum ProductionLiveSourcePrepareResult: Equatable, Sendable {
+    case prepared
+    case failed(code: String)
+}
+
 @MainActor
 final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
     private static let videoAuthorizationUnavailableStatus =
@@ -60,7 +71,6 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
     private static let videoAuthorizationRequestingStatus =
         "正在请求摄像头权限"
     private static let previewFreshnessNanoseconds: UInt64 = 1_000_000_000
-    private static let wakeProbeTimeoutNanoseconds: UInt64 = 10_000_000_000
     private static let defaultTargetSnapshotRetryDelaysNanoseconds: [UInt64] = [
         200_000_000,
         500_000_000,
@@ -110,7 +120,12 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
     typealias VideoAuthorizationRequest = @Sendable (
         @escaping @Sendable (Bool) -> Void
     ) -> Void
-    typealias TargetHomeAction = @Sendable (CanonicalUDID) throws -> Void
+    typealias TargetHomeAction = @Sendable (
+        CanonicalUDID
+    ) -> ProductionLiveSourceWakeActionResult
+    typealias TargetPrepareAction = @Sendable (
+        CanonicalUDID
+    ) -> ProductionLiveSourcePrepareResult
 
     private enum ProbeKind {
         case cached
@@ -138,8 +153,9 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
         qos: .userInitiated
     )
     private let targetHomeAction: TargetHomeAction?
-    private let targetHomeQueue = DispatchQueue(
-        label: "com.pulsephone.gui.target-home",
+    private let targetPrepareAction: TargetPrepareAction?
+    private let targetWakeQueue = DispatchQueue(
+        label: "com.pulsephone.gui.target-wake",
         qos: .userInitiated
     )
     private let targetSnapshotRetryDelaysNanoseconds: [UInt64]
@@ -170,6 +186,7 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
         fenceTargets: @escaping FenceTargets,
         activeBindingsProvider: @escaping ActiveBindingsProvider = { [] },
         targetHomeAction: TargetHomeAction? = nil,
+        targetPrepareAction: TargetPrepareAction? = nil,
         captureFactory: CaptureFactory? = nil,
         inventoryRefreshProvider: (@Sendable () throws -> VideoSourceInventory)? = nil,
         probeTimeout: DispatchTimeInterval = .seconds(2),
@@ -215,6 +232,7 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
         self.presentsWindows = presentsWindows
         self.targetSnapshotProvider = targetSnapshotProvider
         self.targetHomeAction = targetHomeAction
+        self.targetPrepareAction = targetPrepareAction
         self.inventoryRefresh = inventoryRefresh
         self.firstHandoff = firstHandoff
         self.firstBlindHandoff = firstBlindHandoff
@@ -360,7 +378,7 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
                             state.targetSnapshotObservedFacts = true
                             state.targetSnapshot = snapshot
                             self.updateTargetIdentity(state)
-                            self.refreshWakeAndProbeAvailability(state)
+                            self.refreshWakeDeviceAvailability(state)
                             self.loadClaims(
                                 for: state,
                                 snapshot: snapshot,
@@ -453,7 +471,7 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
             }
             self.rebuildCandidates(state)
             self.refreshConfirmAvailability(state)
-            self.refreshWakeAndProbeAvailability(state)
+            self.refreshWakeDeviceAvailability(state)
             if recentPreview != nil {
                 self.setStatus(nil, in: state)
             }
@@ -775,19 +793,27 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
         identity.font = .systemFont(ofSize: 13, weight: .semibold)
         identity.lineBreakMode = .byTruncatingMiddle
         identity.translatesAutoresizingMaskIntoConstraints = false
-        let wakeAndProbe = NSButton(
-            title: "唤醒并探测",
+        let wakeDevice = NSButton(
+            title: "唤醒设备",
             target: self,
-            action: #selector(wakeAndProbeTarget(_:))
+            action: #selector(wakeDevice(_:))
         )
-        wakeAndProbe.identifier = NSUserInterfaceItemIdentifier(state.ownerID)
-        wakeAndProbe.toolTip = "向当前设备发送 Home，并等待视频源的真实画面"
-        wakeAndProbe.bezelStyle = .rounded
-        wakeAndProbe.isHidden = true
-        wakeAndProbe.translatesAutoresizingMaskIntoConstraints = false
+        wakeDevice.identifier = NSUserInterfaceItemIdentifier(state.ownerID)
+        wakeDevice.toolTip = "向当前设备发送 Home"
+        wakeDevice.bezelStyle = .rounded
+        wakeDevice.isHidden = true
+        wakeDevice.translatesAutoresizingMaskIntoConstraints = false
+        let wakeResult = NSTextField(labelWithString: "")
+        wakeResult.font = .systemFont(ofSize: 11)
+        wakeResult.textColor = .secondaryLabelColor
+        wakeResult.alignment = .right
+        wakeResult.lineBreakMode = .byTruncatingMiddle
+        wakeResult.isHidden = true
+        wakeResult.translatesAutoresizingMaskIntoConstraints = false
         header.addSubview(targetIcon)
         header.addSubview(identity)
-        header.addSubview(wakeAndProbe)
+        header.addSubview(wakeDevice)
+        header.addSubview(wakeResult)
 
         let listTitle = NSTextField(labelWithString: "视频源")
         listTitle.font = .systemFont(ofSize: 12, weight: .semibold)
@@ -962,22 +988,32 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             header.topAnchor.constraint(equalTo: root.topAnchor),
-            header.heightAnchor.constraint(equalToConstant: 52),
+            header.heightAnchor.constraint(equalToConstant: 70),
             targetIcon.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 16),
             targetIcon.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             targetIcon.widthAnchor.constraint(equalToConstant: 18),
             targetIcon.heightAnchor.constraint(equalToConstant: 22),
             identity.leadingAnchor.constraint(equalTo: targetIcon.trailingAnchor, constant: 9),
             identity.trailingAnchor.constraint(
-                lessThanOrEqualTo: wakeAndProbe.leadingAnchor,
+                lessThanOrEqualTo: wakeDevice.leadingAnchor,
                 constant: -12
             ),
             identity.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            wakeAndProbe.trailingAnchor.constraint(
+            wakeDevice.trailingAnchor.constraint(
                 equalTo: header.trailingAnchor,
                 constant: -16
             ),
-            wakeAndProbe.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            wakeDevice.topAnchor.constraint(equalTo: header.topAnchor, constant: 8),
+            wakeResult.trailingAnchor.constraint(equalTo: wakeDevice.trailingAnchor),
+            wakeResult.topAnchor.constraint(equalTo: wakeDevice.bottomAnchor, constant: 2),
+            wakeResult.leadingAnchor.constraint(
+                greaterThanOrEqualTo: identity.trailingAnchor,
+                constant: 12
+            ),
+            wakeResult.bottomAnchor.constraint(
+                lessThanOrEqualTo: header.bottomAnchor,
+                constant: -6
+            ),
 
             workspace.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             workspace.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -1081,7 +1117,8 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
         window.center()
         state.window = window
         state.identityLabel = identity
-        state.wakeAndProbeButton = wakeAndProbe
+        state.wakeDeviceButton = wakeDevice
+        state.wakeResultLabel = wakeResult
         state.statusLabel = status
         state.statusArea = statusArea
         state.cameraAuthorizationButton = cameraAuthorization
@@ -1091,7 +1128,7 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
         state.previewPlaceholderLabel = previewPlaceholder
         state.warningLabel = warning
         state.confirmButton = confirm
-        refreshWakeAndProbeAvailability(state)
+        refreshWakeDeviceAvailability(state)
         rebuildCandidates(state)
         if presentsWindows { window.makeKeyAndOrderFront(nil) }
     }
@@ -1434,14 +1471,14 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
             state.selectedDescriptor = descriptor
             updateReassignmentWarning(state)
             refreshConfirmAvailability(state)
-            refreshWakeAndProbeAvailability(state)
+            refreshWakeDeviceAvailability(state)
             rebuildCandidates(state)
             return
         }
         state.selectedDescriptor = descriptor
         state.confirmButton?.isEnabled = false
         updateReassignmentWarning(state)
-        refreshWakeAndProbeAvailability(state)
+        refreshWakeDeviceAvailability(state)
         rebuildCandidates(state)
         stopProbe(state) { [weak self, weak state] in
             guard let self, let state, self.isCurrent(state),
@@ -1594,19 +1631,7 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
             maximumAgeNanoseconds: Self.previewFreshnessNanoseconds
         ) != nil
         refreshConfirmAvailability(state)
-        refreshWakeAndProbeAvailability(state)
-        if fresh, state.wakeProbeToken != nil {
-            state.wakeProbeToken = nil
-            refreshWakeAndProbeAvailability(state)
-            setStatus("已检测到新画面，可以使用此源", in: state)
-        } else if !fresh {
-            setStatus(
-                state.wakeProbeToken == nil
-                    ? "视频正在准备"
-                    : "正在等待设备亮屏后的画面",
-                in: state
-            )
-        }
+        if !fresh { setStatus("视频正在准备", in: state) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self, weak state] in
             MainActor.assumeIsolated {
                 guard let self, let state else { return }
@@ -1615,68 +1640,134 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
         }
     }
 
-    @objc private func wakeAndProbeTarget(_ sender: NSButton) {
+    @objc private func wakeDevice(_ sender: NSButton) {
         guard let ownerID = sender.identifier?.rawValue,
               let state = owners[ownerID],
               isCurrent(state),
-              supportsWakeAndProbe(state),
-              state.selectedDescriptor != nil,
-              state.wakeProbeToken == nil,
-              let targetHomeAction
+              supportsWakeDevice(state),
+              state.wakeActionToken == nil,
+              let targetHomeAction,
+              let targetPrepareAction
         else { return }
 
+        if let code = state.wakePrepareFailureCode {
+            setWakeResult("Developer Support 准备此前失败：\(code)", in: state)
+            return
+        }
+
         let token = UUID()
-        state.wakeProbeToken = token
-        refreshWakeAndProbeAvailability(state)
-        setStatus("正在唤醒设备并等待画面", in: state)
+        state.wakeActionToken = token
+        refreshWakeDeviceAvailability(state)
+        setWakeResult("正在发送 Home…", in: state)
         let target = state.canonicalUDID
-        targetHomeQueue.async { [weak self, weak state] in
-            let failure: Error?
-            do {
-                try targetHomeAction(target)
-                failure = nil
-            } catch {
-                failure = error
-            }
+        targetWakeQueue.async { [weak self, weak state] in
+            let result = targetHomeAction(target)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, let state, self.isCurrent(state),
-                          state.wakeProbeToken == token
+                          state.wakeActionToken == token
                     else { return }
-                    guard failure == nil else {
-                        state.wakeProbeToken = nil
-                        self.refreshWakeAndProbeAvailability(state)
-                        self.setStatus("无法唤醒设备，请确认设备支持 Home", in: state)
-                        return
-                    }
-                    self.setStatus("Home 已发送，正在等待画面", in: state)
-                    self.scheduleWakeProbeTimeout(state, token: token)
+                    self.completeWakeHome(
+                        result,
+                        target: target,
+                        prepare: targetPrepareAction,
+                        state: state,
+                        token: token
+                    )
                 }
             }
         }
     }
 
-    private func scheduleWakeProbeTimeout(
-        _ state: ProductionLiveSourceResolverState,
+    private func completeWakeHome(
+        _ result: ProductionLiveSourceWakeActionResult,
+        target: CanonicalUDID,
+        prepare: @escaping TargetPrepareAction,
+        state: ProductionLiveSourceResolverState,
         token: UUID
     ) {
-        let now = DispatchTime.now().uptimeNanoseconds
-        let addition = now.addingReportingOverflow(
-            Self.wakeProbeTimeoutNanoseconds
-        )
-        let deadline = DispatchTime(uptimeNanoseconds: addition.overflow
-            ? UInt64.max
-            : addition.partialValue)
-        DispatchQueue.main.asyncAfter(deadline: deadline) { [self, weak state] in
-            MainActor.assumeIsolated {
-                guard let state, self.isCurrent(state),
-                      state.wakeProbeToken == token
-                else { return }
-                state.wakeProbeToken = nil
-                self.refreshWakeAndProbeAvailability(state)
-                self.setStatus("未检测到画面；设备可能仍在熄屏或视频源不可用", in: state)
+        switch result {
+        case .sent:
+            finishWakeAction("已发送 Home", state: state, token: token)
+        case .failed(let code):
+            finishWakeAction("未发送 Home：\(code)", state: state, token: token)
+        case .requiresPreparation:
+            setWakeResult("正在准备 Developer Support…", in: state)
+            targetWakeQueue.async { [weak self, weak state] in
+                let result = prepare(target)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self, let state, self.isCurrent(state),
+                              state.wakeActionToken == token
+                        else { return }
+                        switch result {
+                        case .prepared:
+                            self.setWakeResult(
+                                "准备完成，正在发送 Home…",
+                                in: state
+                            )
+                            self.retryWakeHome(
+                                target: target,
+                                state: state,
+                                token: token
+                            )
+                        case .failed(let code):
+                            state.wakePrepareFailureCode = code
+                            self.finishWakeAction(
+                                "Developer Support 准备失败：\(code)",
+                                state: state,
+                                token: token
+                            )
+                        }
+                    }
+                }
             }
         }
+    }
+
+    private func retryWakeHome(
+        target: CanonicalUDID,
+        state: ProductionLiveSourceResolverState,
+        token: UUID
+    ) {
+        guard let targetHomeAction else { return }
+        targetWakeQueue.async { [weak self, weak state] in
+            let result = targetHomeAction(target)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, let state, self.isCurrent(state),
+                          state.wakeActionToken == token
+                    else { return }
+                    switch result {
+                    case .sent:
+                        self.finishWakeAction("已发送 Home", state: state, token: token)
+                    case .requiresPreparation:
+                        self.finishWakeAction(
+                            "未发送 Home：capabilityPreparing",
+                            state: state,
+                            token: token
+                        )
+                    case .failed(let code):
+                        self.finishWakeAction(
+                            "未发送 Home：\(code)",
+                            state: state,
+                            token: token
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func finishWakeAction(
+        _ text: String,
+        state: ProductionLiveSourceResolverState,
+        token: UUID
+    ) {
+        guard state.wakeActionToken == token else { return }
+        state.wakeActionToken = nil
+        refreshWakeDeviceAvailability(state)
+        setWakeResult(text, in: state)
     }
 
     @objc private func confirmSelection(_ sender: NSButton) {
@@ -2131,33 +2222,35 @@ final class ProductionLiveSourceResolver: NSObject, NSWindowDelegate {
         state.confirmButton?.isEnabled = state.claimsReady && fresh
     }
 
-    private func refreshWakeAndProbeAvailability(
+    private func refreshWakeDeviceAvailability(
         _ state: ProductionLiveSourceResolverState
     ) {
-        guard let button = state.wakeAndProbeButton else { return }
-        let hasFreshPreview = state.previewToken.flatMap { token in
-            state.previewSink?.recentFrame(
-                ownerToken: token,
-                nowNanoseconds: SystemMonotonicClock().now().nanoseconds,
-                maximumAgeNanoseconds: Self.previewFreshnessNanoseconds
-            )
-        } != nil
-        let visible = supportsWakeAndProbe(state)
-            && state.selectedDescriptor != nil
-            && !hasFreshPreview
+        guard let button = state.wakeDeviceButton else { return }
+        let visible = supportsWakeDevice(state)
         button.isHidden = !visible
-        button.isEnabled = visible && state.wakeProbeToken == nil
-        button.title = state.wakeProbeToken == nil ? "唤醒并探测" : "正在唤醒…"
+        button.isEnabled = visible && state.wakeActionToken == nil
+        button.title = state.wakeActionToken == nil ? "唤醒设备" : "正在唤醒…"
+        if !visible { state.wakeResultLabel?.isHidden = true }
     }
 
-    private func supportsWakeAndProbe(
+    private func supportsWakeDevice(
         _ state: ProductionLiveSourceResolverState
     ) -> Bool {
         guard targetHomeAction != nil,
+              targetPrepareAction != nil,
               let osVersion = state.targetSnapshot?.target.osVersion,
               let major = UInt64(osVersion.split(separator: ".").first ?? "")
         else { return false }
         return major >= 17
+    }
+
+    private func setWakeResult(
+        _ text: String?,
+        in state: ProductionLiveSourceResolverState
+    ) {
+        let value = text ?? ""
+        state.wakeResultLabel?.stringValue = value
+        state.wakeResultLabel?.isHidden = value.isEmpty
     }
 
     private func updateTargetIdentity(_ state: ProductionLiveSourceResolverState) {
@@ -2329,8 +2422,10 @@ private final class ProductionLiveSourceResolverState {
     var userInteracted = false
     var videoAuthorizationRequestInFlight = false
     var warningLabel: NSTextField?
-    weak var wakeAndProbeButton: NSButton?
-    var wakeProbeToken: UUID?
+    var wakeActionToken: UUID?
+    weak var wakeDeviceButton: NSButton?
+    var wakePrepareFailureCode: String?
+    weak var wakeResultLabel: NSTextField?
     var window: NSWindow?
 
     init(
