@@ -45,6 +45,10 @@ private enum ProductionBoundVideoStopPresentation {
     case freezeIfAvailable(reason: LiveWindowPlaceholderReason)
 }
 
+private enum ProductionGUIHostWakeProbeError: Error {
+    case controllerUnavailable
+}
+
 public final class ProductionGUIHostWindowController:
     NSObject,
     NSWindowDelegate,
@@ -184,6 +188,19 @@ public final class ProductionGUIHostWindowController:
                     target: state.canonicalUDID
                 )
             } ?? []
+        },
+        targetHomeAction: { [weak self] target in
+            guard let self else {
+                throw ProductionGUIHostWakeProbeError.controllerUnavailable
+            }
+            let session = try self.runtimeSessionFactory(target)
+            defer { try? session.close() }
+            _ = try session.prepareCapabilities()
+            _ = try session.submit(
+                commandID: "button.home",
+                rawArguments: [:],
+                actionID: CanonicalUUID(value: UUID())
+            )
         }
     )
 
