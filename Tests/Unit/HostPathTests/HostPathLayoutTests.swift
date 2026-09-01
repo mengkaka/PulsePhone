@@ -86,6 +86,15 @@ final class HostPathLayoutTests: XCTestCase {
             "/Users/test/Library/Application Support/PulsePhone/DeveloperImages"
         )
         XCTAssertEqual(
+            layout.configurationDirectory,
+            "/Users/test/Library/Application Support/PulsePhone/Configuration"
+        )
+        XCTAssertEqual(
+            layout.configurationFilePath,
+            "/Users/test/Library/Application Support/PulsePhone/Configuration/"
+                + "configuration.v1.json"
+        )
+        XCTAssertEqual(
             layout.videoSourceMappingsDirectory,
             "/Users/test/Library/Application Support/PulsePhone/VideoSourceMappings"
         )

@@ -104,6 +104,8 @@ final class CLIStaticHelpTests: XCTestCase {
             XCTAssertEqual(output.exitCode, 0)
             XCTAssertTrue(output.chunk.stderr.isEmpty)
             XCTAssertTrue(output.chunk.stdout[0].contains("Commands:"))
+            XCTAssertTrue(output.chunk.stdout[0].contains("Configuration:"))
+            XCTAssertTrue(output.chunk.stdout[0].contains("PulsePhone config --help"))
         }
         let paths = Set(surface.variants.map(\.commandPath))
         for path in paths {

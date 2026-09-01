@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import ImageIO
 @testable import PulsePhoneElement
+import PulsePhoneHostPaths
 import PulsePhoneMedia
 import PulsePhoneSharedDefinitions
 import XCTest
@@ -13,29 +14,31 @@ final class ElementAnalyzerTests: XCTestCase {
         super.tearDown()
     }
 
-    func testEndpointConfigurationUsesDefaultAndValidatedOverride() throws {
-        let defaultValue = try OmniParserEndpointConfiguration(environment: [:])
-        XCTAssertEqual(defaultValue.endpoint.absoluteString, OmniParserEndpointConfiguration.defaultEndpoint)
-        XCTAssertEqual(defaultValue.redactedHost, "192.168.1.142:8000")
-        XCTAssertEqual(defaultValue.source, .defaultValue)
-        XCTAssertEqual(defaultValue.networkScope, .ownerApprovedDefault)
-        XCTAssertFalse(defaultValue.usesTLS)
+    func testEndpointConfigurationIsDisabledUntilConfigured() throws {
+        XCTAssertNil(try OmniParserEndpointConfiguration.resolve(
+            environment: [:],
+            managedEndpoint: nil
+        ))
 
-        XCTAssertThrowsError(try OmniParserEndpointConfiguration(environment: [
+        let override = try XCTUnwrap(OmniParserEndpointConfiguration.resolve(
+            environment: [
             OmniParserEndpointConfiguration.environmentKey:
                 "https://omni.example.test:8443/v3/parse/",
-        ]))
-
-        let override = try OmniParserEndpointConfiguration(environment: [
-            OmniParserEndpointConfiguration.environmentKey:
-                "https://omni.example.test:8443/v3/parse/",
-            OmniParserEndpointConfiguration.remoteAccessEnvironmentKey: "1",
-        ])
+            ],
+            managedEndpoint: "http://ignored.example.test/parse/"
+        ))
         XCTAssertEqual(override.endpoint.absoluteString, "https://omni.example.test:8443/v3/parse/")
         XCTAssertEqual(override.redactedHost, "omni.example.test:8443")
         XCTAssertEqual(override.source, .environment)
-        XCTAssertEqual(override.networkScope, .explicitRemote)
+        XCTAssertEqual(override.networkScope, .configured)
         XCTAssertTrue(override.usesTLS)
+
+        let managed = try XCTUnwrap(OmniParserEndpointConfiguration.resolve(
+            environment: [:],
+            managedEndpoint: "http://192.168.1.143:8000/parse/"
+        ))
+        XCTAssertEqual(managed.source, .managedConfiguration)
+        XCTAssertEqual(managed.networkScope, .configured)
 
         let ipv6 = try OmniParserEndpointConfiguration(
             endpointString: "http://[::1]:8000/parse/",
@@ -44,20 +47,9 @@ final class ElementAnalyzerTests: XCTestCase {
         XCTAssertEqual(ipv6.redactedHost, "[::1]:8000")
         XCTAssertEqual(ipv6.networkScope, .loopback)
 
-        XCTAssertThrowsError(try OmniParserEndpointConfiguration(environment: [
-            OmniParserEndpointConfiguration.environmentKey:
-                "https://omni.example.test/parse/",
-            OmniParserEndpointConfiguration.remoteAccessEnvironmentKey: "true",
-        ]))
-        XCTAssertThrowsError(try OmniParserEndpointConfiguration(
-            endpointString: "http://omni.example.test/parse/",
-            source: .environment,
-            remoteAccess: .explicitlyAllowed
-        ))
         XCTAssertNoThrow(try OmniParserEndpointConfiguration(
-            endpointString: "http://192.168.1.143:8000/parse/",
-            source: .environment,
-            remoteAccess: .explicitlyAllowed
+            endpointString: "http://omni.example.test/parse/",
+            source: .environment
         ))
 
         for invalid in [
@@ -74,6 +66,21 @@ final class ElementAnalyzerTests: XCTestCase {
             )) { error in
                 XCTAssertEqual(error as? ElementAnalyzerError, .invalidEndpoint)
             }
+        }
+    }
+
+    func testManagedEndpointRequiresAStringConfigurationValue() {
+        let snapshot = PulsePhoneConfigurationSnapshot(values: [
+            PulsePhoneConfigurationKey.omniParserEndpoint.rawValue: .boolean(true),
+        ])
+
+        XCTAssertThrowsError(
+            try PulsePhoneConfigurationRegistry.omniParserEndpoint(in: snapshot)
+        ) { error in
+            XCTAssertEqual(
+                error as? PulsePhoneConfigurationRegistryError,
+                .invalidValue
+            )
         }
     }
 
@@ -169,8 +176,7 @@ final class ElementAnalyzerTests: XCTestCase {
             configurationProvider: {
                 try OmniParserEndpointConfiguration(
                     endpointString: endpoint.value,
-                    source: .environment,
-                    remoteAccess: .explicitlyAllowed
+                    source: .environment
                 )
             },
             analyzerFactory: { configuration in
@@ -194,7 +200,7 @@ final class ElementAnalyzerTests: XCTestCase {
         XCTAssertEqual(snapshot.initializationCount, 1)
         XCTAssertEqual(snapshot.retirementCount, 0)
         XCTAssertEqual(snapshot.redactedHost, "first.omni.example.test")
-        XCTAssertEqual(snapshot.networkScope, .explicitRemote)
+        XCTAssertEqual(snapshot.networkScope, .configured)
         XCTAssertEqual(snapshot.configurationSource, .environment)
 
         endpoint.value = "https://second.omni.example.test/v3/parse/"
@@ -228,13 +234,13 @@ final class ElementAnalyzerTests: XCTestCase {
         XCTAssertEqual(stopped.status, .unavailable)
     }
 
-    func testOmniDefaultEndpointLiteralHasSingleOwningSource() throws {
+    func testOmniEndpointHasNoBuiltInNetworkDefault() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let literal = OmniParserEndpointConfiguration.defaultEndpoint
+        let literal = "192.168." + "1.142:8000"
         var matches = [String]()
         for directory in ["Sources", "Tests"] {
             let directoryURL = root.appendingPathComponent(directory)
@@ -255,12 +261,7 @@ final class ElementAnalyzerTests: XCTestCase {
                 ))
             }
         }
-        XCTAssertEqual(
-            matches.sorted(),
-            [
-                "Sources/PulsePhoneElement/OmniParserEndpointConfiguration.swift",
-            ]
-        )
+        XCTAssertTrue(matches.isEmpty)
     }
 
     func testOmniResponseMapsPixelInputBoxBackToSourcePixels() throws {
@@ -574,8 +575,7 @@ final class ElementAnalyzerTests: XCTestCase {
         let analyzer = OmniParserAnalyzer(
             configuration: try OmniParserEndpointConfiguration(
                 endpointString: "https://omni.example.test/parse/",
-                source: .environment,
-                remoteAccess: .explicitlyAllowed
+                source: .environment
             ),
             renderer: ElementImageRenderer(),
             session: stubSession(),
@@ -761,8 +761,7 @@ final class ElementAnalyzerTests: XCTestCase {
         let analyzer = OmniParserAnalyzer(
             configuration: try OmniParserEndpointConfiguration(
                 endpointString: "https://omni.example.test/parse/",
-                source: .environment,
-                remoteAccess: .explicitlyAllowed
+                source: .environment
             ),
             circuitPolicy: OmniParserCircuitPolicy(
                 failureThreshold: 2,
@@ -811,8 +810,7 @@ final class ElementAnalyzerTests: XCTestCase {
         let analyzer = OmniParserAnalyzer(
             configuration: try OmniParserEndpointConfiguration(
                 endpointString: "https://omni.example.test/parse/",
-                source: .environment,
-                remoteAccess: .explicitlyAllowed
+                source: .environment
             ),
             circuitPolicy: OmniParserCircuitPolicy(
                 failureThreshold: 1,
@@ -2350,8 +2348,7 @@ final class ElementAnalyzerTests: XCTestCase {
         OmniParserAnalyzer(
             configuration: try! OmniParserEndpointConfiguration(
                 endpointString: "https://omni.example.test/parse/",
-                source: .environment,
-                remoteAccess: .explicitlyAllowed
+                source: .environment
             ),
             renderer: ElementImageRenderer(),
             session: stubSession(),

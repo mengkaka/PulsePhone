@@ -39,6 +39,18 @@ PulsePhone skill install --agent all
 
 Install to another agent's absolute skill root with `PulsePhone skill install --skill-root /absolute/path`. Use `PulsePhone skill status` to inspect managed targets. If a managed skill was edited locally, rerun the install with `--force` only when replacing those managed files is intended.
 
+## OmniParser
+
+PulsePhone uses Apple Vision text recognition and Apple region analysis locally by default. You can optionally connect [OmniParser](https://github.com/microsoft/OmniParser) to improve element-detection accuracy on more complex screens. OmniParser is disabled by default, so screenshots are not sent to a network service unless you configure an endpoint.
+
+The setting is stored locally and is used by newly started device runtimes:
+
+```sh
+PulsePhone config set omniparser.endpoint https://omni.example.com/parse/
+```
+
+Run `PulsePhone config --help` to view supported configuration keys.
+
 ## CLI
 
 Every public command supports human output and `--json`; success is written to stdout, progress and human errors to stderr, and JSON terminal output is exactly one envelope.

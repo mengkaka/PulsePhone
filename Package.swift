@@ -37,6 +37,7 @@ let package = Package(
             dependencies: [
                 "PulsePhoneClientCore",
                 "PulsePhoneDeveloperImageAssets",
+                "PulsePhoneElement",
                 "PulsePhoneLogging",
                 "PulsePhoneRuntimeKernel",
             ] + sharedTargets
@@ -76,6 +77,7 @@ let package = Package(
         .target(
             name: "PulsePhoneElement",
             dependencies: [
+                "PulsePhoneHostPaths",
                 "PulsePhoneMedia",
                 "PulsePhoneSharedDefinitions",
             ]
@@ -205,6 +207,7 @@ let package = Package(
             name: "PulsePhoneElementTests",
             dependencies: [
                 "PulsePhoneElement",
+                "PulsePhoneHostPaths",
                 "PulsePhoneMedia",
                 "PulsePhoneSharedDefinitions",
             ],
@@ -215,6 +218,7 @@ let package = Package(
             dependencies: [
                 "PulsePhoneCLI",
                 "PulsePhoneClientCore",
+                "PulsePhoneHostPaths",
                 "PulsePhoneSharedDefinitions",
             ],
             path: "Tests/Unit/CLIContractTests"

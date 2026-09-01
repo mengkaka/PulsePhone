@@ -15,6 +15,7 @@ public struct HostPathLayoutV1: Hashable, Sendable {
     public let temporaryBasePath: String
     public let persistentHistoryDirectory: String
     public let developerImageStoreDirectory: String
+    public let configurationDirectory: String
     public let videoSourceMappingsDirectory: String
 
     public init(effectiveUserID: uid_t, trustedHomeDirectory: String) throws {
@@ -28,6 +29,8 @@ public struct HostPathLayoutV1: Hashable, Sendable {
             + "/Library/Application Support/PulsePhone/ActionLogs"
         self.developerImageStoreDirectory = trustedHomeDirectory
             + "/Library/Application Support/PulsePhone/DeveloperImages"
+        self.configurationDirectory = trustedHomeDirectory
+            + "/Library/Application Support/PulsePhone/Configuration"
         self.videoSourceMappingsDirectory = trustedHomeDirectory
             + "/Library/Application Support/PulsePhone/VideoSourceMappings"
     }
@@ -82,6 +85,10 @@ public struct HostPathLayoutV1: Hashable, Sendable {
         for canonicalUDID: CanonicalUDID
     ) -> String {
         "\(videoSourceMappingsDirectory)/\(VideoSourceMappingPathV1.fileName(for: canonicalUDID))"
+    }
+
+    public var configurationFilePath: String {
+        "\(configurationDirectory)/configuration.v1.json"
     }
 
     public static func validateUnixDomainSocketPath(_ path: String) throws {

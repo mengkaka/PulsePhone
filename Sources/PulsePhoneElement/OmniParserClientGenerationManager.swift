@@ -46,11 +46,9 @@ public actor OmniParserClientGenerationManager {
     private var retirementCount: UInt64 = 0
     private var stopped = false
 
-    public init() {
+    public init(configuration: OmniParserEndpointConfiguration) {
         self.analyzerFactory = { OmniParserAnalyzer(configuration: $0) }
-        self.configurationProvider = {
-            try OmniParserEndpointConfiguration()
-        }
+        self.configurationProvider = { configuration }
     }
 
     init(

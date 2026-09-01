@@ -3,6 +3,7 @@ import Foundation
 import PulsePhoneClientCore
 import PulsePhoneCommandPlanner
 import PulsePhoneDeveloperImageAssets
+import PulsePhoneElement
 import PulsePhoneHostPaths
 import PulsePhoneLogging
 import PulsePhoneSharedDefinitions
@@ -285,6 +286,12 @@ public struct PulsePhoneCLIProcess: Sendable {
         let mode = CLIArgumentPreflight.outputMode(in: arguments)
         let adapter = CLIOutputAdapter(mode: mode)
         do {
+            if let terminal = try PulsePhoneConfigCommand.dispatch(
+                arguments: arguments,
+                adapter: adapter
+            ) {
+                return terminal
+            }
             let surface = try makeStaticSurface()
             let internalSelection = try Self.extractInternalAnalyzerSelection(
                 from: arguments

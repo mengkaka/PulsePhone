@@ -23,7 +23,7 @@ public struct CLIHelpRenderer: Sendable {
     }
 
     public func commandTable() -> String {
-        surface.groups.compactMap { group in
+        let catalogGroups = surface.groups.compactMap { group in
             let variants = surface.variants.filter { $0.groupID == group.groupID }
                 .sorted { lhs, rhs in
                     if lhs.commandPath != rhs.commandPath {
@@ -39,6 +39,7 @@ public struct CLIHelpRenderer: Sendable {
             }
             return ([group.title + ":"] + rows).joined(separator: "\n")
         }.joined(separator: "\n\n")
+        return [catalogGroups, configurationCommands()].joined(separator: "\n\n")
     }
 
     private func topLevel() -> String {
@@ -59,6 +60,10 @@ public struct CLIHelpRenderer: Sendable {
             "Global options:",
             global,
         ].joined(separator: "\n")
+    }
+
+    private func configurationCommands() -> String {
+        PulsePhoneConfigCommand.globalHelpSection
     }
 
     private func command(path: String) throws -> String {

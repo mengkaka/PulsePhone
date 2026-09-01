@@ -1,6 +1,7 @@
 import Darwin
 import Dispatch
 import Foundation
+import PulsePhoneHostPaths
 import ImageIO
 import PulsePhoneElement
 import PulsePhoneMedia
@@ -509,7 +510,8 @@ final class ProductionElementSnapshotPipeline: @unchecked Sendable {
         canonicalUDID: CanonicalUDID,
         executablePath: String
     ) -> ProductionElementSnapshotPipeline {
-        let omni = OmniParserClientGenerationManager()
+        let omniStartup = omniParserStartup()
+        let omni = omniStartup.manager
         let vision = VisionTextAnalyzer()
         let apple = AppleRegionAnalyzer(
             transportFactory: {
@@ -518,6 +520,14 @@ final class ProductionElementSnapshotPipeline: @unchecked Sendable {
         )
         let operations = ElementAnalyzerOperations(
             omniparser: { frame in
+                guard let omni else {
+                    return ElementAnalyzerResult(
+                        source: .omniparser,
+                        status: .unavailable,
+                        profileID: ElementAnalyzerProfiles.omniparser.profileID,
+                        backend: omniStartup.unavailableBackend
+                    )
+                }
                 return await omni.analyze(frame)
             },
             vision: { frame in await vision.analyze(frame) },
@@ -558,6 +568,46 @@ final class ProductionElementSnapshotPipeline: @unchecked Sendable {
             omniManager: omni,
             visionAnalyzer: vision
         )
+    }
+
+    private static func omniParserStartup() -> (
+        manager: OmniParserClientGenerationManager?,
+        unavailableBackend: String
+    ) {
+        do {
+            let environment = ProcessInfo.processInfo.environment
+            if environment[OmniParserEndpointConfiguration.environmentKey] != nil {
+                let configuration = try OmniParserEndpointConfiguration.resolve(
+                    environment: environment,
+                    managedEndpoint: nil
+                )
+                guard let configuration else {
+                    return (nil, "configurationUnset")
+                }
+                return (
+                    OmniParserClientGenerationManager(configuration: configuration),
+                    "notApplicable"
+                )
+            }
+            let snapshot = try PulsePhoneConfigurationStore.bundled().load()
+            let configuration = try OmniParserEndpointConfiguration.resolve(
+                environment: environment,
+                managedEndpoint: PulsePhoneConfigurationRegistry.omniParserEndpoint(
+                    in: snapshot
+                )
+            )
+            guard let configuration else {
+                return (nil, "configurationUnset")
+            }
+            return (
+                OmniParserClientGenerationManager(configuration: configuration),
+                "notApplicable"
+            )
+        } catch is PulsePhoneConfigurationStoreError {
+            return (nil, "configurationUnreadable")
+        } catch {
+            return (nil, "configurationInvalid")
+        }
     }
 
     func run(

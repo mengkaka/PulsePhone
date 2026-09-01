@@ -194,14 +194,14 @@ OmniParser 或 Vision。默认连续三次 worker/protocol failure 打开 Apple-
 shutdown 取消并 join startup/detect，关闭 pipe、终止并 reap process；shutdown 后 analyzer 只返回
 unavailable。
 
-OmniParser endpoint 由唯一 `OmniParserEndpointConfiguration` 解析。内置部署值固定为 owner 已批准的
-`http://192.168.1.142:8000/parse/`；loopback endpoint 无需额外授权。环境变量
-`PULSEPHONE_OMNIPARSER_ENDPOINT` 指向其他非 loopback endpoint 时，必须同时设置
-`PULSEPHONE_OMNIPARSER_ALLOW_REMOTE=1`；公共 hostname/IP 必须使用 HTTPS，显式 private/link-local
-address literal 才允许 HTTP。所有 endpoint 都在 Runtime client generation 建立时完成 scheme、host、
-length、credential 和 network-scope policy 校验；配置变化先退休旧 connection pool 再建立新 client。
-公开 CLI 不接受 endpoint 参数。diagnostics 只记录脱敏 host、config source、network scope 和 TLS
-状态，不记录 credential、query 或完整 URL。
+OmniParser 默认未配置并保持 disabled；此时 element snapshot 不创建 HTTP client，也不发送截图到网络
+服务。endpoint 由唯一 `OmniParserEndpointConfiguration` 解析：一次性环境变量
+`PULSEPHONE_OMNIPARSER_ENDPOINT` 优先于 PulsePhone 受控 Application Support 配置文件。公开 CLI 使用
+`PulsePhone config --help` 枚举允许 key，并使用 `PulsePhone config get|set|clear omniparser.endpoint` 查询或
+修改该持久化值。所有 endpoint 在 Runtime 创建时完成
+scheme、host、length 和 credential 校验；已运行 Runtime 保持启动时的配置，后续 set/clear 只作用于新建
+Runtime。diagnostics 只记录脱敏 host、config source、network scope 和 TLS 状态，不记录 credential、query
+或完整 URL。
 
 OmniParser production HTTP 合同固定为 `POST /parse/`。该接口不定义 GET application readiness；
 client 不发送预检请求，也不从 HTTP 405、推测的 device/backend 或阈值回显构造 capability。单次
