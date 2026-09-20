@@ -1,9 +1,11 @@
 import PulsePhoneClientCore
 import PulsePhoneSharedDefinitions
+import PulsePhoneWire
 
 public struct DevicePrepareCommandResult: Codable, Equatable, Sendable {
     public let assetDisposition: String
     public let capabilityIDs: [String]
+    public let capabilityResults: [PreparationCapabilityResultV1]
     public let disposition: String
     public let mountDisposition: String
     public let preparationGroupID: String
@@ -115,6 +117,7 @@ public struct DevicePrepareCommandSession: Sendable {
                 let projection = DevicePrepareCommandResult(
                     assetDisposition: result.assetDisposition,
                     capabilityIDs: result.capabilityIDs,
+                    capabilityResults: result.capabilityResults,
                     disposition: result.disposition,
                     mountDisposition: result.mountDisposition,
                     preparationGroupID: result.preparationGroupID,
@@ -124,11 +127,20 @@ public struct DevicePrepareCommandSession: Sendable {
                 let ready = result.disposition == "alreadyReady"
                     ? "already ready"
                     : "ready"
+                let optionalUnavailable = result.capabilityResults
+                    .filter {
+                        $0.requirement == .optional
+                            && $0.state == .unavailable
+                    }
+                    .map(\.capabilityID)
+                let human = optionalUnavailable.isEmpty
+                    ? "\(request.canonicalUDID) is \(ready)"
+                    : "\(request.canonicalUDID) is \(ready); optional capabilities unavailable: \(optionalUnavailable.joined(separator: ","))"
                 return .terminal(try adapter.success(
                     commandID: DevicePrepareCommand.commandID,
                     target: .device(request.canonicalUDID),
                     result: projection,
-                    human: "\(request.canonicalUDID) is \(ready)"
+                    human: human
                 ))
             }
             guard let error = terminal.error else {

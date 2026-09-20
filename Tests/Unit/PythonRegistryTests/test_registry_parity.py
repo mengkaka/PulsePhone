@@ -144,14 +144,14 @@ class RegistryParityTests(unittest.TestCase):
         )
         self.assertEqual(
             sha256_hex(wire_bytes),
-            "397cc8a70da13db93c7aec49424a2c289a39eff924d35092dcabdcb027f4e357",
+            "126acc151ce42642c901f73cd733d6af7ce00e28cb81f22c3a3b079528370606",
         )
         self.assertEqual(
             domain_separated_sha256_hex(
                 "pulsephone.wire-registry-set.v1",
                 wire_bytes,
             ),
-            "5d2a1822d73224f3afb8e1d9b87613eb2dda3ea7cf69c997f9bcb5ff5e2dfa60",
+            "85414363f1e84a4c9f8fe863319355beab20d2845aded1fb382f6d33094762dd",
         )
 
     def artifact_set_bytes(self, paths, set_id, revision) -> bytes:

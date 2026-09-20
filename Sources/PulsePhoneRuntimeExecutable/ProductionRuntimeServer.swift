@@ -216,12 +216,6 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         subsystem: "com.pulsephone.PulsePhoneRuntime",
         category: "developer-support"
     )
-  private static let modernElementCaptureProviderOrder: [SnapshotCaptureProvider] = [
-    .dvt, .coreDevice, .axAudit,
-  ]
-    private static let modernElementCaptureProviderPlanID =
-        modernElementCaptureProviderOrder.map(\.rawValue).joined(separator: "->")
-
     public init(
         handler: @escaping Handler,
         streamFrameHandler: StreamFrameHandler? = nil,
@@ -1107,6 +1101,20 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                 guard let device = snapshot.device else {
                     return .failed(code: "deviceDisconnected")
                 }
+                let providerOrder: [String]?
+                if routeID == ScreenshotRoute.modernCoreDevice.rawValue {
+                    guard let plan = coordinator.screenshotProviderPlan(
+                        connectionEpoch: snapshot.connectionEpoch
+                    ) else {
+                        return .failed(code: "capabilityPreparing")
+                    }
+                    guard !plan.attemptOrder.isEmpty else {
+                        return .failed(code: "developerServicesUnavailable")
+                    }
+                    providerOrder = plan.attemptOrder
+                } else {
+                    providerOrder = nil
+                }
                 return try executeScreenshot(
                     request: request,
                     actionID: actionID,
@@ -1118,6 +1126,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                         == ScreenshotRoute.legacyScreenshotR.rawValue
                         ? directHelperExecutor
                         : helperExecutor,
+                    screenshotProviderOrder: providerOrder,
                     screenshotStore: screenshotStore
                 )
             } catch ProductionRuntimeDeviceCoordinatorError.screenshotUnavailable(
@@ -1817,16 +1826,30 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                                 authorityObserver
                             )
                         }
-            let captureExecutor =
+                        let captureExecutor =
               routeID
                             == ScreenshotRoute.legacyScreenshotR.rawValue
                             ? directHelperExecutor : helperExecutor
+                        let providerPlan: ProductionScreenshotProviderPlan?
+                        if routeID == ScreenshotRoute.modernCoreDevice.rawValue {
+                            guard let plan = coordinator.screenshotProviderPlan(
+                                connectionEpoch: authority.connectionEpoch
+                            ) else {
+                                return .failed(code: "capabilityPreparing")
+                            }
+                            guard !plan.attemptOrder.isEmpty else {
+                                return .failed(code: "developerServicesUnavailable")
+                            }
+                            providerPlan = plan
+                        } else {
+                            providerPlan = nil
+                        }
                         let captureRequestID = CanonicalUUID(value: UUID())
                         let captureKey = ProductionElementDeviceCaptureKey(
                             geometry: geometry,
                             providerPlanID: routeID
                                 == ScreenshotRoute.modernCoreDevice.rawValue
-                                ? Self.modernElementCaptureProviderPlanID
+                                ? providerPlan?.identifier ?? "unavailable"
                                 : "legacyScreenshotR",
                             targetIdentity: authority.uniqueDeviceID
                         )
@@ -1848,6 +1871,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                                     connectionEpoch: authority.connectionEpoch,
                                     geometry: geometry,
                                     helperExecutor: captureExecutor,
+                                    screenshotProviderOrder: providerPlan?.attemptOrder,
                                     screenshotStore: screenshotStore,
                                     cancellation: producerCancellation
                                 )
@@ -2085,6 +2109,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         connectionEpoch: UInt64,
         geometry: DisplayGeometryDTO,
         helperExecutor: ProductionCoreDeviceHelperExecutor,
+        screenshotProviderOrder: [String]?,
         screenshotStore: ProductionScreenshotArtifactStore,
         cancellation: ProductionElementSnapshotCancellation
     ) throws -> ProductionElementSnapshotCapture {
@@ -2110,9 +2135,16 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                 "reservationPath": .string(reservation.internalPath),
             ]
             if route == .modernCoreDevice {
+                guard let screenshotProviderOrder,
+                      !screenshotProviderOrder.isEmpty
+                else {
+                    throw ElementCaptureDispositionError(
+                        disposition: .failed(code: "developerServicesUnavailable")
+                    )
+                }
                 backendPayload["captureProviderOrder"] = .array(
-                    modernElementCaptureProviderOrder.map {
-                        .string($0.rawValue)
+                    screenshotProviderOrder.map {
+                        .string($0)
                     }
                 )
             }
@@ -2141,7 +2173,8 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                   let backendFormat = ScreenshotBackendFormat(rawValue: formatText),
                   let captureMetadata = elementCaptureMetadata(
                     route: route,
-                    value: value
+                    value: value,
+                    providerOrder: screenshotProviderOrder
                   )
             else {
                 screenshotStore.cancel(reservation)
@@ -2190,7 +2223,8 @@ public struct ProductionRuntimeOperationBackend: Sendable {
 
     static func elementCaptureMetadata(
         route: ScreenshotRoute,
-        value: RepositoryJSONObject
+        value: RepositoryJSONObject,
+        providerOrder: [String]? = nil
     ) -> ElementCaptureMetadata? {
         switch route {
         case .legacyScreenshotR:
@@ -2203,6 +2237,8 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                 provider: .legacyScreenshotR
             )
         case .modernCoreDevice:
+            let expectedProviderOrder = providerOrder
+                ?? ProductionScreenshotProviderPlan.compatibilityDefault.attemptOrder
             guard let provider = value["captureProvider"]?.stringValue else {
                 return nil
             }
@@ -2220,7 +2256,8 @@ public struct ProductionRuntimeOperationBackend: Sendable {
       guard
         let attempts = elementCaptureAttempts(
                 value["_pulsephoneCaptureAttempts"],
-                finalProvider: captureProvider
+                finalProvider: captureProvider,
+                providerOrder: expectedProviderOrder
         )
       else { return nil }
             if attempts.count == 1 {
@@ -2240,14 +2277,18 @@ public struct ProductionRuntimeOperationBackend: Sendable {
 
     private static func elementCaptureAttempts(
         _ value: RepositoryJSONValue?,
-        finalProvider: SnapshotCaptureProvider
+        finalProvider: SnapshotCaptureProvider,
+        providerOrder: [String]
     ) -> [ElementSnapshotCaptureAttempt]? {
         guard let rawAttempts = value?.arrayValue,
               (1...3).contains(rawAttempts.count)
         else { return nil }
-        let providerOrder = modernElementCaptureProviderOrder
-        let expectedProviders = Array(providerOrder.prefix(rawAttempts.count))
-        guard expectedProviders.last == finalProvider else { return nil }
+        let expectedProviders = providerOrder.compactMap(snapshotCaptureProvider)
+        guard expectedProviders.count == providerOrder.count,
+              rawAttempts.count <= expectedProviders.count
+        else { return nil }
+        let attemptedProviders = Array(expectedProviders.prefix(rawAttempts.count))
+        guard attemptedProviders.last == finalProvider else { return nil }
 
         var attempts = [ElementSnapshotCaptureAttempt]()
         for (index, rawAttempt) in rawAttempts.enumerated() {
@@ -2257,7 +2298,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                       "errorCode", "provider", "stage", "status", "timings",
                   ]),
                   object["provider"]?.stringValue
-                    == expectedProviders[index].rawValue,
+                    == attemptedProviders[index].rawValue,
                   let statusText = object["status"]?.stringValue,
                   let status = ElementSnapshotCaptureAttemptStatus(
                     rawValue: statusText
@@ -2287,7 +2328,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                       let rawStage = object["stage"]?.stringValue,
                       let normalizedStage = elementCaptureFailureStage(
                         rawStage,
-                        provider: expectedProviders[index]
+                        provider: attemptedProviders[index]
                       )
                 else { return nil }
                 errorCode = .developerServicesUnavailable
@@ -2295,7 +2336,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             }
       attempts.append(
         ElementSnapshotCaptureAttempt(
-                provider: expectedProviders[index],
+                provider: attemptedProviders[index],
                 status: status,
                 errorCode: errorCode,
                 failureStage: failureStage,
@@ -2303,6 +2344,17 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             ))
         }
         return attempts
+    }
+
+    private static func snapshotCaptureProvider(
+        _ provider: String
+    ) -> SnapshotCaptureProvider? {
+        switch provider {
+        case "coreDevice": .coreDevice
+        case "dvt": .dvt
+        case "axAudit": .axAudit
+        default: nil
+        }
     }
 
     private static func elementCaptureFailureStage(
@@ -2414,6 +2466,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         device: ProductionRuntimeDeviceObservation,
         connectionEpoch: UInt64,
         helperExecutor: ProductionCoreDeviceHelperExecutor,
+        screenshotProviderOrder: [String]?,
         screenshotStore: ProductionScreenshotArtifactStore
     ) throws -> ProductionRuntimeBackendDisposition {
         guard ScreenshotRoute(rawValue: routeID) != nil else {
@@ -2430,19 +2483,26 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             )
         }
         do {
+            var backendPayload: [String: HelperWireJSONValue] = [
+                "artifactID": .string(artifactID.canonicalString),
+                "commandID": .string(
+                    request.body["commandID"]?.stringValue
+                        ?? "screenshot.gui"
+                ),
+                "operation": .string("screenshot"),
+                "reservationPath": .string(reservation.internalPath),
+            ]
+            if let screenshotProviderOrder {
+                backendPayload["captureProviderOrder"] = .array(
+                    screenshotProviderOrder.map { .string($0) }
+                )
+            }
             let result = try helperExecutor.executeOneShot(
                 requestID: request.requestID,
                 actionID: actionID,
                 parentActionID: parentActionID,
                 routeID: routeID,
-                backendPayload: [
-                    "artifactID": .string(artifactID.canonicalString),
-          "commandID": .string(
-            request.body["commandID"]?.stringValue
-                        ?? "screenshot.gui"),
-                    "operation": .string("screenshot"),
-                    "reservationPath": .string(reservation.internalPath),
-                ],
+                backendPayload: backendPayload,
                 device: device,
                 connectionEpoch: connectionEpoch
             )
@@ -3244,6 +3304,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         capabilityIDs: capabilityIDs,
         groupID: groupID,
         route: route,
+        coordinator: coordinator,
         device: device,
         connectionEpoch: snapshot.connectionEpoch,
         helperExecutor: helperExecutor,
@@ -3437,6 +3498,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
     capabilityIDs: [String],
     groupID: String,
     route: DeveloperSupportOSRoute,
+    coordinator: ProductionRuntimeDeviceCoordinator,
     device: ProductionRuntimeDeviceObservation,
     connectionEpoch: UInt64,
     helperExecutor: ProductionCoreDeviceHelperExecutor,
@@ -3452,6 +3514,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         preparationAttemptID: preparationAttemptID,
         capabilityIDs: capabilityIDs,
         groupID: groupID,
+        coordinator: coordinator,
         device: device,
         connectionEpoch: connectionEpoch,
         helperExecutor: helperExecutor,
@@ -3498,6 +3561,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
     preparationAttemptID: CanonicalUUID,
     capabilityIDs: [String],
     groupID: String,
+    coordinator: ProductionRuntimeDeviceCoordinator,
     device: ProductionRuntimeDeviceObservation,
     connectionEpoch: UInt64,
     helperExecutor: ProductionCoreDeviceHelperExecutor,
@@ -3523,6 +3587,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         assetDisposition: .mountedOnly,
         capabilityIDs: capabilityIDs,
         connectionEpoch: connectionEpoch,
+        coordinator: coordinator,
         disposition: .alreadyReady,
         groupID: groupID,
         mountDisposition: .alreadyMounted,
@@ -3643,6 +3708,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
       assetDisposition: assetDisposition,
       capabilityIDs: capabilityIDs,
       connectionEpoch: connectionEpoch,
+      coordinator: coordinator,
       disposition: .ready,
       groupID: groupID,
       mountDisposition: .mounted,
@@ -3974,6 +4040,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                 assetDisposition: .mountedOnly,
                 capabilityIDs: capabilityIDs,
                 connectionEpoch: connectionEpoch,
+                coordinator: coordinator,
                 disposition: .alreadyReady,
                 groupID: groupID,
                 mountDisposition: .alreadyMounted,
@@ -4186,6 +4253,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             assetDisposition: assetDisposition,
             capabilityIDs: capabilityIDs,
             connectionEpoch: connectionEpoch,
+            coordinator: coordinator,
             disposition: .ready,
             groupID: groupID,
             mountDisposition: .mounted,
@@ -4245,12 +4313,21 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             else {
                 return .serviceWarmupFailed
             }
+            guard let screenshotProviderPlan = screenshotProviderPlan(
+                from: warmValue
+            ) else {
+                return .serviceWarmupFailed
+            }
             let current = try coordinator.commandAdmissionSnapshot()
             guard current.connectionEpoch == snapshot.connectionEpoch,
                   current.device == device
             else {
                 return .staleConnection
             }
+            try coordinator.recordScreenshotProviderPlan(
+                screenshotProviderPlan,
+                connectionEpoch: current.connectionEpoch
+            )
             _ = try coordinator.markPreparationReady(
                 groupID: groupID,
                 connectionEpoch: current.connectionEpoch
@@ -4567,6 +4644,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         assetDisposition: PreparationAssetDisposition,
         capabilityIDs: [String],
         connectionEpoch: UInt64,
+        coordinator: ProductionRuntimeDeviceCoordinator,
         disposition: PreparationResultDisposition,
         groupID: String,
         mountDisposition: PreparationMountDisposition,
@@ -4595,10 +4673,27 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         else {
             return .failed(code: "preparationFailed")
         }
+        guard let screenshotProviderPlan = screenshotProviderPlan(
+            from: helperValue
+        ) else {
+            return .failed(code: "preparationFailed")
+        }
+        try coordinator.recordScreenshotProviderPlan(
+            screenshotProviderPlan,
+            connectionEpoch: connectionEpoch
+        )
+        let capabilityResults = try preparationCapabilityResults(
+            groupID: groupID,
+            requiredCapabilityIDs: capabilityIDs,
+            helperValue: helperValue,
+            coordinator: coordinator,
+            connectionEpoch: connectionEpoch
+        )
         progress.publish(.probingServices)
         _ = try PreparationResultV1(
             assetDisposition: assetDisposition,
             capabilityIDs: capabilityIDs,
+            capabilityResults: capabilityResults,
             connectionEpoch: connectionEpoch,
             disposition: disposition,
             executorGeneration: executorGeneration,
@@ -4611,6 +4706,9 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         var members: [(String, RepositoryJSONValue)] = [
             ("assetDisposition", .string(assetDisposition.rawValue)),
             ("capabilityIDs", .array(capabilityIDs.map { .string($0) })),
+            ("capabilityResults", .array(
+                try capabilityResults.map(capabilityResultValue)
+            )),
             ("connectionEpoch", .number(.uint64(connectionEpoch))),
             ("disposition", .string(disposition.rawValue)),
             ("executorGeneration", .number(.uint64(executorGeneration))),
@@ -4628,6 +4726,91 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         }
         progress.publish(.ready)
         return .succeeded(value: try object(members))
+    }
+
+    private static func screenshotProviderPlan(
+        from helperValue: RepositoryJSONObject
+    ) -> ProductionScreenshotProviderPlan? {
+        guard let provider = helperValue["screenshotProvider"]?.stringValue,
+              let values = helperValue["screenshotAttemptOrder"]?.arrayValue
+        else {
+            // Older co-resident helpers predate the probe fields. Keep their
+            // historic behavior while a fresh generation replaces them.
+            return .compatibilityDefault
+        }
+        let order = values.compactMap(\.stringValue)
+        guard order.count == values.count else { return nil }
+        return ProductionScreenshotProviderPlan(
+            preferredProvider: provider,
+            attemptOrder: order
+        )
+    }
+
+    private static func preparationCapabilityResults(
+        groupID: String,
+        requiredCapabilityIDs: [String],
+        helperValue: RepositoryJSONObject,
+        coordinator: ProductionRuntimeDeviceCoordinator,
+        connectionEpoch: UInt64
+    ) throws -> [PreparationCapabilityResultV1] {
+        let plan = screenshotProviderPlan(from: helperValue)
+        let optionalIDs = coordinator.optionalCapabilityIDs(groupID: groupID) ?? []
+        var results = try requiredCapabilityIDs.map {
+            try PreparationCapabilityResultV1(
+                capabilityID: $0,
+                requirement: .required,
+                state: .available
+            )
+        }
+        var availability = [String: CapabilityAvailability]()
+        for capabilityID in optionalIDs {
+            let state: PreparationCapabilityState
+            let reason: String?
+            if capabilityID == "coredevice.screenshot" {
+                if plan?.attemptOrder.isEmpty == false {
+                    state = .available
+                    reason = nil
+                    availability[capabilityID] = .available
+                } else {
+                    state = .unavailable
+                    reason = "allProvidersUnavailable"
+                    availability[capabilityID] = .unavailable(
+                        reason: reason!
+                    )
+                }
+            } else {
+                state = .unknown
+                reason = "notProbed"
+                availability[capabilityID] = .unknown
+            }
+            results.append(try PreparationCapabilityResultV1(
+                capabilityID: capabilityID,
+                reason: reason,
+                requirement: .optional,
+                state: state
+            ))
+        }
+        try coordinator.recordOptionalCapabilityAvailability(
+            availability,
+            connectionEpoch: connectionEpoch
+        )
+        return results.sorted {
+            $0.capabilityID.utf8.lexicographicallyPrecedes($1.capabilityID.utf8)
+        }
+    }
+
+    private static func capabilityResultValue(
+        _ result: PreparationCapabilityResultV1
+    ) throws -> RepositoryJSONValue {
+        var members: [(String, RepositoryJSONValue)] = [
+            ("capabilityID", .string(result.capabilityID)),
+            ("requirement", .string(result.requirement.rawValue)),
+            ("state", .string(result.state.rawValue)),
+        ]
+        if let reason = result.reason {
+            members.append(("reason", .string(reason)))
+        }
+        return .object(try object(members))
     }
 
     private static let modernWarmReadinessTimeout: TimeInterval = 5 * 60
@@ -4973,9 +5156,17 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         preparationAttemptID: CanonicalUUID?,
         provenance: String
     ) throws -> ProductionRuntimeBackendDisposition {
+        let capabilityResults = try capabilityIDs.sorted().map {
+            try PreparationCapabilityResultV1(
+                capabilityID: $0,
+                requirement: .required,
+                state: .available
+            )
+        }
         _ = try PreparationResultV1(
             assetDisposition: assetDisposition,
             capabilityIDs: capabilityIDs,
+            capabilityResults: capabilityResults,
             connectionEpoch: connectionEpoch,
             disposition: disposition,
             mountDisposition: mountDisposition,
@@ -4987,6 +5178,9 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         var members: [(String, RepositoryJSONValue)] = [
             ("assetDisposition", .string(assetDisposition.rawValue)),
             ("capabilityIDs", .array(capabilityIDs.map { .string($0) })),
+            ("capabilityResults", .array(
+                try capabilityResults.map(capabilityResultValue)
+            )),
             ("connectionEpoch", .number(.uint64(connectionEpoch))),
             ("disposition", .string(disposition.rawValue)),
             ("mountDisposition", .string(mountDisposition.rawValue)),
@@ -6278,7 +6472,7 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
     public static let runtimeBuildID = "pulsephone.runtime.v1"
     public static let runtimeCompatibilityID = "runtime.compat.v4"
     public static let executionCatalogHash =
-    "494f0e80a087941a7651163bbdedd3e567559de57f1cdb88da7020ce296d76cf"
+    "e7c5d8e1a8436cf0f6fff9b7b6a22f5b34404dbcb636c7b516f016053ae2a1a1"
 
     private let canonicalUDID: CanonicalUDID
     private let connectionTimeoutSeconds: Int

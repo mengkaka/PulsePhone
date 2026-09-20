@@ -32,6 +32,7 @@ public struct PreparationGroupDescriptor: Equatable, Sendable {
   public let compatibilityRuleID: String
   public let phaseClaimBindings: [PreparationPhaseClaimBinding]
   public let preparationGroupID: String
+  public let optionalCapabilityIDs: [String]
   public let releaseScope: ReleaseScope
   public let requiredCapabilityIDs: [String]
   public let route: PreparationRoute
@@ -41,6 +42,7 @@ public struct PreparationGroupDescriptor: Equatable, Sendable {
     compatibilityRuleID: String,
     phaseClaimBindings: [PreparationPhaseClaimBinding],
     preparationGroupID: String,
+    optionalCapabilityIDs: [String] = [],
     releaseScope: ReleaseScope,
     requiredCapabilityIDs: [String],
     route: PreparationRoute,
@@ -49,6 +51,7 @@ public struct PreparationGroupDescriptor: Equatable, Sendable {
     self.compatibilityRuleID = compatibilityRuleID
     self.phaseClaimBindings = phaseClaimBindings
     self.preparationGroupID = preparationGroupID
+    self.optionalCapabilityIDs = optionalCapabilityIDs
     self.releaseScope = releaseScope
     self.requiredCapabilityIDs = requiredCapabilityIDs
     self.route = route

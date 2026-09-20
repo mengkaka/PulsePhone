@@ -3,6 +3,7 @@ import PulsePhoneSharedDefinitions
 public enum PreparationResultValidationError: Error, Equatable, Sendable {
     case invalidAttemptDisposition
     case invalidCapabilityIDs
+    case invalidCapabilityResults
     case invalidGroupID
     case invalidProvenance
 }
@@ -34,6 +35,7 @@ public enum PreparationServiceDisposition: String, Equatable, Sendable {
 public struct PreparationResultV1: Equatable, Sendable {
     public let assetDisposition: PreparationAssetDisposition
     public let capabilityIDs: [String]
+    public let capabilityResults: [PreparationCapabilityResultV1]
     public let connectionEpoch: UInt64?
     public let disposition: PreparationResultDisposition
     public let executorGeneration: UInt64?
@@ -46,6 +48,7 @@ public struct PreparationResultV1: Equatable, Sendable {
     public init(
         assetDisposition: PreparationAssetDisposition,
         capabilityIDs: [String],
+        capabilityResults: [PreparationCapabilityResultV1] = [],
         connectionEpoch: UInt64? = nil,
         disposition: PreparationResultDisposition,
         executorGeneration: UInt64? = nil,
@@ -64,6 +67,15 @@ public struct PreparationResultV1: Equatable, Sendable {
         ) else {
             throw PreparationResultValidationError.invalidCapabilityIDs
         }
+        guard capabilityResults.count <= 64,
+              capabilityResults.map(\.capabilityID)
+                == capabilityResults.map(\.capabilityID)
+                    .sorted(by: { $0.utf8.lexicographicallyPrecedes($1.utf8) }),
+              Set(capabilityResults.map(\.capabilityID)).count
+                == capabilityResults.count
+        else {
+            throw PreparationResultValidationError.invalidCapabilityResults
+        }
         guard provenance == "approved"
                 || provenance == "mountedUnknownUnverified"
         else {
@@ -76,6 +88,7 @@ public struct PreparationResultV1: Equatable, Sendable {
         }
         self.assetDisposition = assetDisposition
         self.capabilityIDs = capabilityIDs
+        self.capabilityResults = capabilityResults
         self.connectionEpoch = connectionEpoch
         self.disposition = disposition
         self.executorGeneration = executorGeneration

@@ -43,6 +43,11 @@ var screenshotProviderAttemptTimeouts = map[string]time.Duration{
 
 var screenshotProviderRetireTimeout = 250 * time.Millisecond
 
+const (
+	screenshotOperationTimeout     = 7 * time.Second
+	screenshotProviderProbeTimeout = 2 * time.Second
+)
+
 type ProductError struct {
 	Code             string
 	Committed        bool
@@ -315,6 +320,7 @@ func (backend *Backend) Warm(deadline time.Time) (map[string]any, error) {
 	if err := backend.ensureReady(deadline); err != nil {
 		return nil, err
 	}
+	preferredScreenshotProvider, screenshotAttemptOrder := backend.probeScreenshotProviders(deadline)
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 	disposition := "ready"
@@ -322,11 +328,63 @@ func (backend *Backend) Warm(deadline time.Time) (map[string]any, error) {
 		disposition = "alreadyReady"
 	}
 	return map[string]any{
-		"disposition":        disposition,
-		"executorGeneration": backend.executorGeneration,
-		"facets":             stringSliceAny(RequiredFacets),
-		"surfaceRevision":    backend.surfaceRevision,
+		"disposition":            disposition,
+		"executorGeneration":     backend.executorGeneration,
+		"facets":                 stringSliceAny(RequiredFacets),
+		"screenshotAttemptOrder": stringSliceAny(screenshotAttemptOrder),
+		"screenshotProvider":     preferredScreenshotProvider,
+		"surfaceRevision":        backend.surfaceRevision,
 	}, nil
+}
+
+func (backend *Backend) probeScreenshotProviders(operationDeadline time.Time) (string, []string) {
+	providers := []string{"dvt", "coreDevice", "axAudit"}
+	for index, provider := range providers {
+		deadline := boundedScreenshotDeadline(operationDeadline, screenshotProviderProbeTimeout)
+		if deadline.IsZero() || time.Until(deadline) <= 0 {
+			break
+		}
+		if err := backend.probeScreenshotProvider(provider, deadline); err == nil {
+			return provider, append([]string(nil), providers[index:]...)
+		}
+	}
+	return "unavailable", []string{}
+}
+
+func (backend *Backend) probeScreenshotProvider(provider string, deadline time.Time) error {
+	ctx, cancel := screenshotContext(deadline)
+	defer cancel()
+	switch provider {
+	case "coreDevice":
+		if backend.openScreenshotService == nil {
+			return errors.New("screenshot provider unavailable")
+		}
+		service, err := openScreenshotCaptureService(ctx, deadline, backend.openScreenshotService)
+		if err != nil {
+			return err
+		}
+		_, _ = newScreenshotCloser(service).closeWithin(screenshotProviderRetireTimeout)
+		return nil
+	case "dvt", "axAudit":
+		backend.mu.Lock()
+		open := backend.openDVTScreenshot
+		if provider == "axAudit" {
+			open = backend.openAXAuditScreenshot
+		}
+		udid := backend.rawUDID
+		backend.mu.Unlock()
+		if open == nil {
+			return errors.New("screenshot provider unavailable")
+		}
+		session, err := openReusableScreenshotProvider(ctx, deadline, udid, open)
+		if err != nil {
+			return err
+		}
+		_, _ = newScreenshotCloser(session).closeWithin(screenshotProviderRetireTimeout)
+		return nil
+	default:
+		return errors.New("unknown screenshot provider")
+	}
 }
 
 func (backend *Backend) ensureReady(deadline time.Time) error {
@@ -375,7 +433,7 @@ func (backend *Backend) ensureReady(deadline time.Time) error {
 		if !ok || service == nil {
 			return fmt.Errorf("unexpected CoreDevice service for %s", facet)
 		}
-		if facet == coreDeviceServiceScreenshot || facet == coreDeviceServicePasteboard {
+		if facet == coreDeviceServicePasteboard {
 			if err := service.Close(); err != nil {
 				return fmt.Errorf("close CoreDevice %s warm channel: %w", facet, err)
 			}
@@ -1443,6 +1501,7 @@ func buildTouchscreenReport(state byte, x, y uint16) []byte {
 }
 
 func (backend *Backend) screenshot(payload map[string]any, deadline time.Time) (map[string]any, error) {
+	deadline = boundedScreenshotDeadline(deadline, screenshotOperationTimeout)
 	ctx := context.Background()
 	if !deadline.IsZero() {
 		var cancel context.CancelFunc
@@ -1457,6 +1516,7 @@ func (backend *Backend) screenshot(payload map[string]any, deadline time.Time) (
 }
 
 func (backend *Backend) screenshotWithContext(ctx context.Context, payload map[string]any, deadline time.Time) (map[string]any, error) {
+	deadline = boundedScreenshotDeadline(deadline, screenshotOperationTimeout)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1622,6 +1682,14 @@ func screenshotAttemptDeadline(provider string, operationDeadline time.Time) tim
 	return deadline
 }
 
+func boundedScreenshotDeadline(parent time.Time, timeout time.Duration) time.Time {
+	deadline := time.Now().Add(timeout)
+	if !parent.IsZero() && parent.Before(deadline) {
+		return parent
+	}
+	return deadline
+}
+
 func screenshotTiming(started, queueWaitStarted, captureAdmitted, completed time.Time, service screenshotServiceTiming) map[string]any {
 	microseconds := func(start, end time.Time) int64 {
 		if end.Before(start) {
@@ -1661,9 +1729,6 @@ func screenshotProviderOrder(payload map[string]any) ([]string, error) {
 			}
 			provider = value
 		}
-		if provider != "coreDevice" && stringValue(payload["commandID"]) != "element.snapshot" {
-			return nil, errors.New("screenshot fallback is internal")
-		}
 		if provider != "coreDevice" && provider != "dvt" && provider != "axAudit" {
 			return nil, errors.New("unknown screenshot provider")
 		}
@@ -1696,16 +1761,18 @@ func screenshotProviderOrder(payload map[string]any) ([]string, error) {
 		}
 		seen[provider] = true
 	}
-	validOrders := map[string]bool{
-		"coreDevice":             true,
-		"dvt":                    true,
-		"axAudit":                true,
-		"dvt,coreDevice":         true,
-		"coreDevice,axAudit":     true,
-		"dvt,coreDevice,axAudit": true,
+	canonical := []string{"dvt", "coreDevice", "axAudit"}
+	position := 0
+	for _, provider := range providers {
+		for position < len(canonical) && canonical[position] != provider {
+			position++
+		}
+		if position == len(canonical) {
+			return nil, errors.New("invalid screenshot provider order")
+		}
+		position++
 	}
-	key := strings.Join(providers, ",")
-	if !validOrders[key] || stringValue(payload["commandID"]) != "element.snapshot" && key != "coreDevice" {
+	if strings.Join(providers, ",") == "" {
 		return nil, errors.New("invalid screenshot provider order")
 	}
 	return providers, nil

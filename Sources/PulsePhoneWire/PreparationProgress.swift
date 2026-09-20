@@ -110,6 +110,18 @@ enum PreparationWireValidation {
         }
     }
 
+    static func validCapabilityID(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        return (1...128).contains(bytes.count)
+            && bytes.allSatisfy { (0x21...0x7e).contains($0) }
+    }
+
+    static func validReason(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        return (1...128).contains(bytes.count)
+            && bytes.allSatisfy { (0x21...0x7e).contains($0) }
+    }
+
     private static func asciiLessThan(_ lhs: String, _ rhs: String) -> Bool {
         lhs.utf8.lexicographicallyPrecedes(rhs.utf8)
     }

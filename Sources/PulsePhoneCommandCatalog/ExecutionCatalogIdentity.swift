@@ -290,6 +290,7 @@ public struct ExecutionCatalogIdentity: Sendable {
         )
       ),
       ("preparationGroupID", .string(group.preparationGroupID)),
+      ("optionalCapabilityIDs", stringSetValue(group.optionalCapabilityIDs)),
       ("requiredCapabilityIDs", stringSetValue(group.requiredCapabilityIDs)),
       ("route", .string(group.route.rawValue)),
       (

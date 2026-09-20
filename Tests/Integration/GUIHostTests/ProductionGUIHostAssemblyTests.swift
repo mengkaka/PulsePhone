@@ -939,7 +939,8 @@ final class ProductionGUIHostAssemblyTests: XCTestCase {
 
         let replacement = try harness.session.simulateDeviceReattached()
         try await waitUntil {
-            harness.session.availabilityCallCount >= 2
+            harness.session.events.filter { $0 == "prepare" }.count >= 2
+                && harness.session.availabilityCallCount >= 2
                 && toolbarButtons.allSatisfy(\.isEnabled)
                 && availabilityOverlay.presentation?.pointerMessage
                     == "Touch preparing"

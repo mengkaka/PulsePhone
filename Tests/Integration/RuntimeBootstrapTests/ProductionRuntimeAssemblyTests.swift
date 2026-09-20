@@ -1353,6 +1353,116 @@ final class ProductionRuntimeAssemblyTests: XCTestCase {
         ))
     }
 
+    func testElementCaptureMetadataAcceptsPreparedCoreDeviceFallbackPlan()
+        throws
+    {
+        let timings = try Self.object([
+            ("captureMicroseconds", .number(.uint64(1))),
+            ("queueWaitMicroseconds", .number(.uint64(0))),
+            ("serviceCloseMicroseconds", .number(.uint64(0))),
+            ("serviceOpenMicroseconds", .number(.uint64(1))),
+            ("totalMicroseconds", .number(.uint64(2))),
+        ])
+        let failedCore = try Self.object([
+            ("errorCode", .string("developerServicesUnavailable")),
+            ("provider", .string("coreDevice")),
+            ("stage", .string("screenshotServiceOpen")),
+            ("status", .string("failed")),
+            ("timings", .object(timings)),
+        ])
+        let succeededAXAudit = try Self.object([
+            ("errorCode", .null),
+            ("provider", .string("axAudit")),
+            ("stage", .null),
+            ("status", .string("succeeded")),
+            ("timings", .object(timings)),
+        ])
+        let value = try Self.object([
+            (
+                "_pulsephoneCaptureAttempts",
+                .array([.object(failedCore), .object(succeededAXAudit)])
+            ),
+            ("captureProvider", .string("axAudit")),
+            ("generationDisposition", .string("retiringAfterResult")),
+        ])
+
+        let metadata = try XCTUnwrap(
+            ProductionRuntimeOperationBackend.elementCaptureMetadata(
+                route: .modernCoreDevice,
+                value: value,
+                providerOrder: ["coreDevice", "axAudit"]
+            )
+        )
+        XCTAssertEqual(metadata.provider, .axAudit)
+        XCTAssertEqual(metadata.attempts?.map(\.provider), [.coreDevice, .axAudit])
+    }
+
+    func testScreenshotProviderPlanClearsAcrossConnectionEpoch() throws {
+        let target = try CanonicalUDID(canonicalString: "M2031-SCREENSHOT-PLAN-EPOCH")
+        let catalog = try ExecutionProfileCatalog.load(repositoryRoot: repositoryRoot())
+        let coordinator = ProductionRuntimeDeviceCoordinator(
+            canonicalUDID: target,
+            catalog: catalog,
+            discovery: { Self.deviceObservation(target: target) }
+        )
+        let initial = try coordinator.refresh()
+        let plan = try XCTUnwrap(
+            ProductionScreenshotProviderPlan(
+                preferredProvider: "coreDevice",
+                attemptOrder: ["coreDevice", "axAudit"]
+            )
+        )
+        try coordinator.recordScreenshotProviderPlan(
+            plan,
+            connectionEpoch: initial.connectionEpoch
+        )
+        XCTAssertEqual(
+            coordinator.screenshotProviderPlan(
+                connectionEpoch: initial.connectionEpoch
+            ),
+            plan
+        )
+
+        _ = try coordinator.confirmDisconnected()
+        XCTAssertNil(
+            coordinator.screenshotProviderPlan(
+                connectionEpoch: initial.connectionEpoch
+            )
+        )
+        let replacement = try coordinator.refresh()
+        XCTAssertGreaterThan(replacement.connectionEpoch, initial.connectionEpoch)
+        XCTAssertNil(
+            coordinator.screenshotProviderPlan(
+                connectionEpoch: replacement.connectionEpoch
+            )
+        )
+    }
+
+    func testOptionalCapabilityAvailabilitySurfacesAfterPreparationProbe() throws {
+        let target = try CanonicalUDID(canonicalString: "M2031-OPTIONAL-CAPABILITY")
+        let catalog = try ExecutionProfileCatalog.load(repositoryRoot: repositoryRoot())
+        let coordinator = ProductionRuntimeDeviceCoordinator(
+            canonicalUDID: target,
+            catalog: catalog,
+            discovery: { Self.deviceObservation(target: target) }
+        )
+        let snapshot = try coordinator.refresh()
+        try coordinator.recordOptionalCapabilityAvailability(
+            [
+                "coredevice.screenshot": .unavailable(
+                    reason: "allProvidersUnavailable"
+                ),
+            ],
+            connectionEpoch: snapshot.connectionEpoch
+        )
+
+        let updated = try coordinator.commandAdmissionSnapshot()
+        XCTAssertEqual(
+            updated.planningContext.capabilities["coredevice.screenshot"],
+            .unavailable(reason: "allProvidersUnavailable")
+        )
+    }
+
     func testProductionRecordingStorePersistsStableTraceAndDiagnostics()
         throws
     {

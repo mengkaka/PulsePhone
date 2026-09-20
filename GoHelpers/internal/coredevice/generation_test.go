@@ -48,7 +48,7 @@ func TestCoordinatorWarmAndRetireClosesServicesBeforeTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.State != "ready" || snapshot.Identity.ExecutorGeneration != 2 || len(snapshot.Facets) != 7 {
+	if snapshot.State != "ready" || snapshot.Identity.ExecutorGeneration != 2 || len(snapshot.Facets) != len(RequiredFacets) {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
 	coordinator.RetireCurrent()

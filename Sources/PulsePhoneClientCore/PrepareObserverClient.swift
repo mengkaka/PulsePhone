@@ -70,6 +70,7 @@ public struct PrepareObserverProgressProjection: Equatable, Sendable {
 public struct PrepareObserverSuccessProjection: Equatable, Sendable {
     public let assetDisposition: String
     public let capabilityIDs: [String]
+    public let capabilityResults: [PreparationCapabilityResultV1]
     public let disposition: String
     public let mountDisposition: String
     public let preparationAttemptID: CanonicalUUID?
@@ -80,6 +81,7 @@ public struct PrepareObserverSuccessProjection: Equatable, Sendable {
     public init(
         assetDisposition: String,
         capabilityIDs: [String],
+        capabilityResults: [PreparationCapabilityResultV1] = [],
         disposition: String,
         mountDisposition: String,
         preparationAttemptID: CanonicalUUID? = nil,
@@ -103,6 +105,7 @@ public struct PrepareObserverSuccessProjection: Equatable, Sendable {
         _ = try PreparationResultV1(
             assetDisposition: asset,
             capabilityIDs: capabilityIDs,
+            capabilityResults: capabilityResults,
             disposition: resultDisposition,
             mountDisposition: mount,
             preparationAttemptID: preparationAttemptID,
@@ -112,6 +115,7 @@ public struct PrepareObserverSuccessProjection: Equatable, Sendable {
         )
         self.assetDisposition = assetDisposition
         self.capabilityIDs = capabilityIDs
+        self.capabilityResults = capabilityResults
         self.disposition = disposition
         self.mountDisposition = mountDisposition
         self.preparationAttemptID = preparationAttemptID

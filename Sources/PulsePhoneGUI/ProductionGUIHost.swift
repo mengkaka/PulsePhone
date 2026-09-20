@@ -1360,24 +1360,42 @@ public final class ProductionGUIHostWindowController:
                 try state.liveModel.setControlAvailable(
                     connectionEpoch: replacement.connectionEpoch
                 )
+                state.liveModel.setPointerPreparing(
+                    reason: "reconnectPreparation"
+                )
                 state.pointerLastFailure = nil
             } catch {
                 return
             }
             setStatus("Restoring controls", busy: true, in: state)
+            refreshAvailabilityOverlay(in: state)
             updateSourceControls(state)
-            maybeStartCachedBinding(in: state)
             runtimeQueue.async { [weak self] in
-                let availability = try? session.availability()
+                let availability: RepositoryJSONObject?
+                do {
+                    _ = try session.prepareCapabilities()
+                    availability = try session.availability()
+                } catch {
+                    availability = nil
+                }
                 DispatchQueue.main.async { [weak self] in
                     MainActor.assumeIsolated {
                         guard let self,
                               let current = self.windows[windowID],
                               current.runtimeSession === session,
                               current.runtimeSession?.currentAttachment
-                                == replacement,
-                              let availability
+                                == replacement
                         else { return }
+                        guard let availability else {
+                            current.liveModel.setPointerCapabilityAvailable(false)
+                            self.refreshAvailabilityOverlay(in: current)
+                            self.setStatus(
+                                "Controls unavailable",
+                                busy: false,
+                                in: current
+                            )
+                            return
+                        }
                         self.applyToolbarAvailability(availability, in: current)
                         self.setStatus(nil, busy: false, in: current)
                         self.maybeStartCachedBinding(in: current)

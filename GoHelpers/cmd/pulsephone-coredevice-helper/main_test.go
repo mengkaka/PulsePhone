@@ -258,7 +258,7 @@ func coreDeviceStartupFixtureArguments() []string {
 		"--helper-build-id", "pulsephone.coredevice-helper.v1",
 		"--manifest-hash", strings.Repeat("a", 64),
 	}
-	for _, facet := range coredevice.RequiredFacets {
+	for _, facet := range coredevice.SupportedFacets {
 		arguments = append(arguments, "--facet-service", facet+"=service."+facet)
 	}
 	return arguments

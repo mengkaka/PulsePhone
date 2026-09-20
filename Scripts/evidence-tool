@@ -940,7 +940,7 @@ def verify_bootstrap_contracts() -> Dict[str, Any]:
         [*wire_registry_paths, *wire_schema_paths],
         "pulsephone.wire-registry-set.v1",
     )
-    require(wire_hash == "5d2a1822d73224f3afb8e1d9b87613eb2dda3ea7cf69c997f9bcb5ff5e2dfa60", "wire aggregate hash")
+    require(wire_hash == "85414363f1e84a4c9f8fe863319355beab20d2845aded1fb382f6d33094762dd", "wire aggregate hash")
     operations = load_canonical(ROOT / "Registries/runtime-operations.v1.json")
     operation_ids = {entry["id"] for entry in operations["entries"]}
     synthetic_command = load_canonical(
@@ -1180,7 +1180,7 @@ def implementation_contract_identity() -> Dict[str, Any]:
         },
         "wireRegistry": {
             "revision": wire["revision"],
-            "sha256": "5d2a1822d73224f3afb8e1d9b87613eb2dda3ea7cf69c997f9bcb5ff5e2dfa60",
+            "sha256": "85414363f1e84a4c9f8fe863319355beab20d2845aded1fb382f6d33094762dd",
         },
     }
 

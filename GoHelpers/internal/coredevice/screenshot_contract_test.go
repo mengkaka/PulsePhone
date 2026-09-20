@@ -181,7 +181,9 @@ func TestScreenshotProviderOrderMatchesFallbackContract(t *testing.T) {
 		{name: "explicit core device", payload: map[string]any{"captureProvider": "coreDevice"}, want: []string{"coreDevice"}},
 		{name: "dvt internal provider", payload: map[string]any{"captureProvider": "dvt", "commandID": "element.snapshot"}, want: []string{"dvt"}},
 		{name: "ordered fallback", payload: map[string]any{"captureProviderOrder": []any{"dvt", "coreDevice", "axAudit"}, "commandID": "element.snapshot"}, want: []string{"dvt", "coreDevice", "axAudit"}},
-		{name: "provider order on public route", payload: map[string]any{"captureProvider": "dvt", "commandID": "screenshot.cli"}, wantFail: true},
+		{name: "provider order on public route", payload: map[string]any{"captureProvider": "dvt", "commandID": "screenshot.cli"}, want: []string{"dvt"}},
+		{name: "ordered public fallback", payload: map[string]any{"captureProviderOrder": []any{"coreDevice", "axAudit"}, "commandID": "screenshot.cli"}, want: []string{"coreDevice", "axAudit"}},
+		{name: "non canonical order", payload: map[string]any{"captureProviderOrder": []any{"axAudit", "coreDevice"}, "commandID": "screenshot.cli"}, wantFail: true},
 		{name: "duplicate provider", payload: map[string]any{"captureProviderOrder": []any{"coreDevice", "coreDevice"}, "commandID": "element.snapshot"}, wantFail: true},
 		{name: "mixed fields", payload: map[string]any{"captureProvider": "coreDevice", "captureProviderOrder": []any{"coreDevice"}}, wantFail: true},
 	}

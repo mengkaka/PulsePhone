@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 
@@ -93,6 +94,81 @@ func TestBackendWarmReportsAlreadyReadyForCachedGeneration(t *testing.T) {
 	}
 	if result["disposition"] != "alreadyReady" || result["executorGeneration"] != uint64(11) || result["surfaceRevision"] != "surface.test" {
 		t.Fatalf("warm result = %#v", result)
+	}
+}
+
+func TestBackendWarmSelectsFirstAvailableScreenshotProvider(t *testing.T) {
+	opened := []string{}
+	core := &testScreenshotCaptureService{}
+	backend := &Backend{
+		tunnel:             &CoreDeviceTunnelLease{},
+		services:           map[string]*CoreDeviceService{coreDeviceServiceHID: {}},
+		executorGeneration: 11,
+		surfaceRevision:    "surface.test",
+		openDVTScreenshot: func(string, time.Time) (reusableScreenshotProvider, error) {
+			opened = append(opened, "dvt")
+			return nil, errors.New("DVT unavailable")
+		},
+		openScreenshotService: func(time.Time) (screenshotCaptureService, error) {
+			opened = append(opened, "coreDevice")
+			return core, nil
+		},
+		openAXAuditScreenshot: func(string, time.Time) (reusableScreenshotProvider, error) {
+			opened = append(opened, "axAudit")
+			return &testReusableScreenshotProvider{image: []byte("unused")}, nil
+		},
+	}
+	value, err := backend.Warm(time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value["screenshotProvider"] != "coreDevice" {
+		t.Fatalf("provider = %#v", value["screenshotProvider"])
+	}
+	if got := value["screenshotAttemptOrder"]; !reflect.DeepEqual(got, []any{"coreDevice", "axAudit"}) {
+		t.Fatalf("attempt order = %#v", got)
+	}
+	if !reflect.DeepEqual(opened, []string{"dvt", "coreDevice"}) {
+		t.Fatalf("probe opens = %v", opened)
+	}
+	if core.closes != 1 {
+		t.Fatalf("core probe closes = %d", core.closes)
+	}
+}
+
+func TestBackendWarmSucceedsWhenAllScreenshotProvidersAreUnavailable(t *testing.T) {
+	opened := []string{}
+	backend := &Backend{
+		tunnel:             &CoreDeviceTunnelLease{},
+		services:           map[string]*CoreDeviceService{coreDeviceServiceHID: {}},
+		executorGeneration: 11,
+		surfaceRevision:    "surface.test",
+		openDVTScreenshot: func(string, time.Time) (reusableScreenshotProvider, error) {
+			opened = append(opened, "dvt")
+			return nil, errors.New("DVT unavailable")
+		},
+		openScreenshotService: func(time.Time) (screenshotCaptureService, error) {
+			opened = append(opened, "coreDevice")
+			return nil, errors.New("CoreDevice unavailable")
+		},
+		openAXAuditScreenshot: func(string, time.Time) (reusableScreenshotProvider, error) {
+			opened = append(opened, "axAudit")
+			return nil, errors.New("AXAudit unavailable")
+		},
+	}
+
+	value, err := backend.Warm(time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value["screenshotProvider"] != "unavailable" {
+		t.Fatalf("provider = %#v", value["screenshotProvider"])
+	}
+	if got := value["screenshotAttemptOrder"]; !reflect.DeepEqual(got, []any{}) {
+		t.Fatalf("attempt order = %#v", got)
+	}
+	if !reflect.DeepEqual(opened, []string{"dvt", "coreDevice", "axAudit"}) {
+		t.Fatalf("probe opens = %v", opened)
 	}
 }
 

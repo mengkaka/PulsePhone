@@ -117,6 +117,33 @@ struct ProductionRuntimeElementSnapshotAuthority: Equatable, Sendable {
     }
 }
 
+struct ProductionScreenshotProviderPlan: Equatable, Sendable {
+    let preferredProvider: String
+    let attemptOrder: [String]
+
+    static let compatibilityDefault = ProductionScreenshotProviderPlan(
+        preferredProvider: "dvt",
+        attemptOrder: ["dvt", "coreDevice", "axAudit"]
+    )!
+
+    init?(preferredProvider: String, attemptOrder: [String]) {
+        switch (preferredProvider, attemptOrder) {
+        case ("dvt", ["dvt", "coreDevice", "axAudit"]),
+             ("coreDevice", ["coreDevice", "axAudit"]),
+             ("axAudit", ["axAudit"]),
+             ("unavailable", []):
+            self.preferredProvider = preferredProvider
+            self.attemptOrder = attemptOrder
+        default:
+            return nil
+        }
+    }
+
+    var identifier: String {
+        attemptOrder.isEmpty ? "unavailable" : attemptOrder.joined(separator: "->")
+    }
+}
+
 public final class ProductionRuntimeDeviceCoordinator: @unchecked Sendable {
     public typealias Discovery = @Sendable () throws
         -> ProductionRuntimeDeviceObservation?
@@ -125,6 +152,7 @@ public final class ProductionRuntimeDeviceCoordinator: @unchecked Sendable {
         var device: ProductionRuntimeDeviceObservation?
         var connectionEpoch: UInt64 = 0
         var readyPreparationGroupIDs = Set<String>()
+        var optionalCapabilityAvailability = [String: CapabilityAvailability]()
         var factsRevision: UInt64 = 0
         var conditionRevision: UInt64 = 0
         var capabilityRevision: UInt64 = 0
@@ -132,6 +160,7 @@ public final class ProductionRuntimeDeviceCoordinator: @unchecked Sendable {
         var geometryLogicalWidth: UInt64?
         var geometryLogicalHeight: UInt64?
         var geometryOrientation: DisplayOrientationDTO?
+        var screenshotProviderPlan: ProductionScreenshotProviderPlan?
         var stateRevision: UInt64 = 0
         var liveAttached = false
     }
@@ -316,10 +345,12 @@ public final class ProductionRuntimeDeviceCoordinator: @unchecked Sendable {
         if prior?.rawTransportUDID != discovered?.rawTransportUDID {
             if discovered != nil { state.connectionEpoch = increment(state.connectionEpoch) }
             state.readyPreparationGroupIDs.removeAll()
+            state.optionalCapabilityAvailability.removeAll()
             state.geometryRevision = 0
             state.geometryLogicalWidth = nil
             state.geometryLogicalHeight = nil
             state.geometryOrientation = nil
+            state.screenshotProviderPlan = nil
         }
         if prior?.facts != discovered?.facts {
             state.factsRevision = increment(state.factsRevision)
@@ -671,6 +702,38 @@ public final class ProductionRuntimeDeviceCoordinator: @unchecked Sendable {
         }?.requiredCapabilityIDs
     }
 
+    func optionalCapabilityIDs(groupID: String) -> [String]? {
+        catalog.preparationGroups.first {
+            $0.preparationGroupID == groupID
+        }?.optionalCapabilityIDs
+    }
+
+    func recordOptionalCapabilityAvailability(
+        _ values: [String: CapabilityAvailability],
+        connectionEpoch: UInt64
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard connectionEpoch == state.connectionEpoch else {
+            throw ProductionRuntimeDeviceCoordinatorError.stalePreparationState(
+                groupID: "optional-capabilities",
+                expectedConnectionEpoch: connectionEpoch,
+                currentConnectionEpoch: state.connectionEpoch
+            )
+        }
+        guard values.keys.allSatisfy({ capabilityID in
+            catalog.preparationGroups.contains {
+                $0.optionalCapabilityIDs.contains(capabilityID)
+            }
+        }) else {
+            return
+        }
+        guard state.optionalCapabilityAvailability != values else { return }
+        state.optionalCapabilityAvailability = values
+        state.capabilityRevision = increment(state.capabilityRevision)
+        state.stateRevision = increment(state.stateRevision)
+    }
+
     func validateDeveloperImageCatalog(
         _ developerImageCatalog: DeveloperImageCatalogV1
     ) throws {
@@ -731,6 +794,31 @@ public final class ProductionRuntimeDeviceCoordinator: @unchecked Sendable {
         return try snapshotLocked()
     }
 
+    func recordScreenshotProviderPlan(
+        _ plan: ProductionScreenshotProviderPlan,
+        connectionEpoch: UInt64
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard connectionEpoch == state.connectionEpoch else {
+            throw ProductionRuntimeDeviceCoordinatorError.stalePreparationState(
+                groupID: "prep.coredevice.v2",
+                expectedConnectionEpoch: connectionEpoch,
+                currentConnectionEpoch: state.connectionEpoch
+            )
+        }
+        state.screenshotProviderPlan = plan
+    }
+
+    func screenshotProviderPlan(
+        connectionEpoch: UInt64
+    ) -> ProductionScreenshotProviderPlan? {
+        lock.withLock {
+            guard connectionEpoch == state.connectionEpoch else { return nil }
+            return state.screenshotProviderPlan
+        }
+    }
+
     func developerSupportRoute(osMajor: UInt64) throws -> DeveloperSupportOSRoute {
         try DeveloperSupportOSRouting.resolve(
             osMajor: osMajor,
@@ -789,7 +877,7 @@ public final class ProductionRuntimeDeviceCoordinator: @unchecked Sendable {
         let connected = state.device?.condition.connected == true
         let capabilities = Dictionary(uniqueKeysWithValues:
             catalog.preparationGroups.flatMap { group in
-                group.requiredCapabilityIDs.map { capabilityID in
+                (group.requiredCapabilityIDs + group.optionalCapabilityIDs).map { capabilityID in
                     (
                         capabilityID,
                         capabilityState(
@@ -866,8 +954,14 @@ public final class ProductionRuntimeDeviceCoordinator: @unchecked Sendable {
         }
         guard let group = catalog.preparationGroups.first(where: {
             $0.requiredCapabilityIDs.contains(capabilityID)
+                || $0.optionalCapabilityIDs.contains(capabilityID)
         }) else {
             return .unknown
+        }
+        if group.optionalCapabilityIDs.contains(capabilityID),
+           let optional = state.optionalCapabilityAvailability[capabilityID]
+        {
+            return optional
         }
         if group.route == .none
             || state.readyPreparationGroupIDs.contains(group.preparationGroupID)

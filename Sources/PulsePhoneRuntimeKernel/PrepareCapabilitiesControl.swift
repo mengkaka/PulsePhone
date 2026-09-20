@@ -92,17 +92,20 @@ public struct PrepareCapabilitiesRequestV1: Equatable, Sendable {
 
 public struct PreparationSuccessProjection: Equatable, Sendable {
     public let assetDisposition: PreparationAssetDisposition
+    public let capabilityResults: [PreparationCapabilityResultV1]
     public let mountDisposition: PreparationMountDisposition
     public let provenance: String
     public let serviceDisposition: PreparationServiceDisposition
 
     public init(
         assetDisposition: PreparationAssetDisposition,
+        capabilityResults: [PreparationCapabilityResultV1] = [],
         mountDisposition: PreparationMountDisposition,
         provenance: String,
         serviceDisposition: PreparationServiceDisposition
     ) {
         self.assetDisposition = assetDisposition
+        self.capabilityResults = capabilityResults
         self.mountDisposition = mountDisposition
         self.provenance = provenance
         self.serviceDisposition = serviceDisposition
@@ -629,9 +632,22 @@ public struct PrepareCapabilitiesControl: Sendable {
         guard let group = groups[groupID] else {
             throw PreparationCoordinatorError.unsupportedPreparationGroup
         }
+        let capabilityResults: [PreparationCapabilityResultV1]
+        if projection.capabilityResults.isEmpty {
+            capabilityResults = try sortedASCII(group.requiredCapabilityIDs).map {
+                try PreparationCapabilityResultV1(
+                    capabilityID: $0,
+                    requirement: .required,
+                    state: .available
+                )
+            }
+        } else {
+            capabilityResults = projection.capabilityResults
+        }
         return try PreparationResultV1(
             assetDisposition: projection.assetDisposition,
             capabilityIDs: sortedASCII(group.requiredCapabilityIDs),
+            capabilityResults: capabilityResults,
             connectionEpoch: identity?.connectionEpoch
                 ?? coordinator.snapshot.connectionEpoch,
             disposition: disposition,

@@ -40,7 +40,7 @@ func TestParseFacetServiceMapRequiresExactSurface(t *testing.T) {
 		"screenshot=screenshot",
 	}
 	parsed, err := ParseFacetServiceMap(values)
-	if err != nil || len(parsed) != len(RequiredFacets) {
+	if err != nil || len(parsed) != len(SupportedFacets) {
 		t.Fatalf("parse = %#v, %v", parsed, err)
 	}
 	for _, invalid := range [][]string{
@@ -84,7 +84,6 @@ func TestServiceBundleUsesSortedUniqueResourcesAndClosesReverse(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"com.apple.coredevice.screencaptureservice",
 		"com.apple.coredevice.pasteboardservice",
 		"com.apple.coredevice.devicecontrol",
 		"com.apple.coredevice.hid.universalhidservice",
@@ -100,6 +99,27 @@ func TestServiceBundleUsesSortedUniqueResourcesAndClosesReverse(t *testing.T) {
 	}
 	if err := bundle.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestServiceBundleKeepsScreenshotConfiguredButDoesNotOpenItForReadiness(t *testing.T) {
+	started := []string{}
+	closed := []string{}
+	bundle, err := NewServiceBundle(testServiceNames(), func(name string) (Closable, error) {
+		started = append(started, name)
+		return testCloser{id: name, closed: &closed}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bundle.Close()
+	if len(bundle.Facets) != len(RequiredFacets) {
+		t.Fatalf("readiness facets = %v", bundle.Facets)
+	}
+	for _, name := range started {
+		if name == testServiceNames()["screenshot"] {
+			t.Fatalf("readiness opened screenshot service: %v", started)
+		}
 	}
 }
 

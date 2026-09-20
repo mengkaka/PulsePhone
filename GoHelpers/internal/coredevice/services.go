@@ -16,8 +16,15 @@ var RequiredFacets = []string{
 	"keyboard",
 	"orientation",
 	"pasteboard",
-	"screenshot",
 }
+
+// SupportedFacets is the complete CoreDevice surface advertised to the
+// Runtime. Screenshot remains configured here, but is opened per capture so a
+// broken screenshot service cannot prevent control services from preparing.
+var SupportedFacets = append(
+	append([]string(nil), RequiredFacets...),
+	"screenshot",
+)
 
 type ServiceStarter func(name string) (Closable, error)
 
@@ -37,7 +44,7 @@ func ParseFacetServiceMap(values []string) (map[string]string, error) {
 	result := make(map[string]string, len(values))
 	for _, value := range values {
 		facet, service, ok := splitServiceArgument(value)
-		if !ok || !contains(RequiredFacets, facet) {
+		if !ok || !contains(SupportedFacets, facet) {
 			return nil, errors.New("invalid facet service argument")
 		}
 		if _, exists := result[facet]; exists || !asciiIdentifier(service, 256) {
@@ -45,7 +52,7 @@ func ParseFacetServiceMap(values []string) (map[string]string, error) {
 		}
 		result[facet] = service
 	}
-	if len(result) != len(RequiredFacets) {
+	if len(result) != len(SupportedFacets) {
 		return nil, errors.New("incomplete facet service map")
 	}
 	return result, nil
@@ -56,7 +63,7 @@ func NewServiceBundle(serviceNames map[string]string, start ServiceStarter) (*Se
 		return nil, errors.New("invalid service surface")
 	}
 	names := make(map[string]any, len(serviceNames))
-	for _, facet := range RequiredFacets {
+	for _, facet := range SupportedFacets {
 		service, ok := serviceNames[facet]
 		if !ok || !asciiIdentifier(service, 256) {
 			return nil, errors.New("invalid service surface")
@@ -108,7 +115,7 @@ func (bundle *ServiceBundle) ResourcesByFacet() map[string]Closable {
 
 func serviceSurfaceRevision(serviceNames map[string]string) string {
 	names := make(map[string]any, len(serviceNames))
-	for _, facet := range RequiredFacets {
+	for _, facet := range SupportedFacets {
 		names[facet] = serviceNames[facet]
 	}
 	encoded, err := protocol.EncodeValue(names, false)
@@ -123,10 +130,10 @@ func serviceSurfaceRevision(serviceNames map[string]string) string {
 }
 
 func validServiceNames(serviceNames map[string]string) bool {
-	if len(serviceNames) != len(RequiredFacets) {
+	if len(serviceNames) != len(SupportedFacets) {
 		return false
 	}
-	for _, facet := range RequiredFacets {
+	for _, facet := range SupportedFacets {
 		service, ok := serviceNames[facet]
 		if !ok || !asciiIdentifier(service, 256) {
 			return false

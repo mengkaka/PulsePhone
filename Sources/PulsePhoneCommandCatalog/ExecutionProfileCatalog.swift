@@ -400,18 +400,26 @@ public enum ExecutionProfileCatalog {
     try requireExactKeys(
       object,
       required: [
-        "compatibilityRuleID", "phaseClaimBindings", "preparationGroupID",
-        "releaseScope", "requiredCapabilityIDs", "route",
+        "compatibilityRuleID", "optionalCapabilityIDs", "phaseClaimBindings",
+        "preparationGroupID", "releaseScope", "requiredCapabilityIDs", "route",
         "targetDefaultOSProfileIDs",
       ],
       context: "preparation group"
     )
     let groupID = try identifier(object, "preparationGroupID")
     let capabilities = try strings(object, "requiredCapabilityIDs")
+    let optionalCapabilities = try strings(object, "optionalCapabilityIDs")
     guard (1...16).contains(capabilities.count) else {
       throw CommandCatalogError.invalidValue("required capabilities: \(groupID)")
     }
     try requireSortedUnique(capabilities, context: "required capabilities: \(groupID)")
+    try requireSortedUnique(
+      optionalCapabilities,
+      context: "optional capabilities: \(groupID)"
+    )
+    guard Set(capabilities).isDisjoint(with: optionalCapabilities) else {
+      throw CommandCatalogError.invalidValue("overlapping capabilities: \(groupID)")
+    }
     let profileStrings = try strings(object, "targetDefaultOSProfileIDs")
     guard profileStrings.count <= 2 else {
       throw CommandCatalogError.invalidValue("target profiles: \(groupID)")
@@ -455,6 +463,7 @@ public enum ExecutionProfileCatalog {
       compatibilityRuleID: try identifier(object, "compatibilityRuleID"),
       phaseClaimBindings: phaseBindings,
       preparationGroupID: groupID,
+      optionalCapabilityIDs: optionalCapabilities,
       releaseScope: releaseScope,
       requiredCapabilityIDs: capabilities,
       route: route,

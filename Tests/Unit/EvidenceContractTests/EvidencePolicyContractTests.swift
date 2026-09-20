@@ -58,7 +58,7 @@ final class EvidencePolicyContractTests: XCTestCase {
         )
         XCTAssertEqual(
             expected.wireRegistrySHA256,
-            "5d2a1822d73224f3afb8e1d9b87613eb2dda3ea7cf69c997f9bcb5ff5e2dfa60"
+            "85414363f1e84a4c9f8fe863319355beab20d2845aded1fb382f6d33094762dd"
         )
     }
 
