@@ -27,6 +27,8 @@ type Config struct {
 	HandleFrame          func(protocol.Message) error
 	HandleStreamClose    func(protocol.Message) *RequestResult
 	Close                func() error
+	Lifetime             io.Reader
+	LifetimeExit         func()
 }
 
 type RequestResult struct {
@@ -61,6 +63,17 @@ func RunSession(stdin io.Reader, stdout io.Writer, config Config) (status int) {
 			status = 2
 		}
 	}()
+	if config.Lifetime != nil {
+		go func() {
+			_, _ = io.Copy(io.Discard, config.Lifetime)
+			closeSession()
+			if config.LifetimeExit != nil {
+				config.LifetimeExit()
+				return
+			}
+			os.Exit(0)
+		}()
+	}
 
 	machine := protocol.NewWireMachine(config.RuntimeEpoch, config.ExecutorGeneration)
 	send := func(fields map[string]any, direction protocol.Direction) error {

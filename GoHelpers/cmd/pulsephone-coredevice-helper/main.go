@@ -39,12 +39,33 @@ func main() {
 }
 
 func run() int {
-	return runWith(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, processidentity.CurrentProcessStartIdentity, func(runtimeEpoch, executorGeneration uint64, rawTransportUDID string, connectionEpoch uint64, serviceNames map[string]string) (coreDeviceBackend, error) {
+	lifetime := inheritedLifetime()
+	if lifetime == nil {
+		return 2
+	}
+	defer lifetime.Close()
+	return runWithLifetime(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, lifetime, processidentity.CurrentProcessStartIdentity, func(runtimeEpoch, executorGeneration uint64, rawTransportUDID string, connectionEpoch uint64, serviceNames map[string]string) (coreDeviceBackend, error) {
 		return coredevice.NewBackendForRuntime(runtimeEpoch, executorGeneration, rawTransportUDID, connectionEpoch, serviceNames)
 	})
 }
 
+func inheritedLifetime() *os.File {
+	lifetime := os.NewFile(3, "runtime-lifetime")
+	if lifetime == nil {
+		return nil
+	}
+	if _, err := lifetime.Stat(); err != nil {
+		_ = lifetime.Close()
+		return nil
+	}
+	return lifetime
+}
+
 func runWith(arguments []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, currentProcessStartIdentity func() (string, error), newBackend coreDeviceBackendFactory) int {
+	return runWithLifetime(arguments, stdin, stdout, stderr, nil, currentProcessStartIdentity, newBackend)
+}
+
+func runWithLifetime(arguments []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, lifetime io.Reader, currentProcessStartIdentity func() (string, error), newBackend coreDeviceBackendFactory) int {
 	flags := flag.NewFlagSet("pulsephone-coredevice-helper", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	runtimeEpoch := flags.Uint64("runtime-epoch", 0, "runtime epoch")
@@ -89,6 +110,7 @@ func runWith(arguments []string, stdin io.Reader, stdout io.Writer, stderr io.Wr
 		HelperKind:           "coreDevice",
 		ManifestHash:         *manifestHash,
 		ProcessStartIdentity: *processStartIdentity,
+		Lifetime:             lifetime,
 		Facets:               []any{"appControl", "button", "hid", "keyboard", "orientation", "pasteboard", "screenshot"},
 		AcceptedMonotonicNs:  coredevice.ContinuousMonotonicNanoseconds,
 		HandleRequest: func(message protocol.Message) helperapp.RequestResult {

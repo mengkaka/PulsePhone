@@ -154,6 +154,36 @@ func TestRunSessionClosesOnceWhenClientEOFsAfterReady(t *testing.T) {
 	}
 }
 
+func TestRunSessionClosesWhenRuntimeLifetimeEnds(t *testing.T) {
+	inputReader, inputWriter := io.Pipe()
+	lifetimeReader, lifetimeWriter := io.Pipe()
+	var output bytes.Buffer
+	closeCalls := 0
+	status := make(chan int, 1)
+	go func() {
+		config := sessionTestConfig(func() error {
+			closeCalls++
+			return nil
+		})
+		config.Lifetime = lifetimeReader
+		config.LifetimeExit = func() {
+			_ = inputWriter.Close()
+		}
+		status <- RunSession(inputReader, &output, config)
+	}()
+
+	writeSessionMessage(t, inputWriter, helloAcceptedMessage())
+	if err := lifetimeWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-status; got != 0 {
+		t.Fatalf("status = %d, want 0", got)
+	}
+	if closeCalls != 1 {
+		t.Fatalf("close calls = %d, want 1", closeCalls)
+	}
+}
+
 func TestRequestResultPreservesExplicitErrorDetails(t *testing.T) {
 	value := (RequestResult{
 		ErrorCode:  "outcomeUnknown",
