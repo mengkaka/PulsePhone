@@ -6,6 +6,11 @@
 
 ## 状态定义
 
+本轮新增：OBS-037（investigating，2026-09-20）：Runtime lifetime 退场缺少有界退出、
+串行 cleanup 和 DirectHelper OneShot 覆盖；socket bind/chmod 中间崩溃可能阻断新 generation。
+依据 TRD 05 §23.1 和 TRD 06 §25.6 修复，要求正常协议/退出码不变、父进程死亡后 2 秒退场、
+真实继承 fd/lease 及 socket staging 恢复回归。验收产物统一留到后续设备窗口；当前下一步为源码修复和双 reviewer 复审。
+
 | 状态 | 含义 |
 | --- | --- |
 | `open` | 问题已复现或已有可信证据，但尚未开始修复。 |

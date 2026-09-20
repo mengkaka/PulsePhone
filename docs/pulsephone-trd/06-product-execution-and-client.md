@@ -263,6 +263,13 @@ socket absent + runtime.lock busy + identity cannot be verified
 
 status 本身不等待、不 signal、不 kill、不 recover。compatible socket 使用 full control；incompatible socket 使用 Bootstrap lite并校验 returned canonicalUDID/H。
 
+Runtime socket 先在同一私有目录的 `<H>.bind` 路径 bind、设置 0600 并 listen，最后以不覆盖
+现有节点的原子 rename 发布为 `<H>.sock`。正式路径从不暴露权限尚未完成的 socket；Runtime
+在持有目标 runtime lock 后可以清理自己上一轮启动留下的 owned socket staging 节点，再重试创建。
+staging 清理必须校验目录、节点类型、owner 和 inode，不把正式 socket 的权限检查放宽。
+进程崩溃不能保证执行 defer：已发布的 socket/manifest 仍由原有可信 generation recovery 处理，
+未发布的 staging socket 则在下一次持锁启动时清理。此规则覆盖新版本自身的启动中断，不提供旧版迁移。
+
 ### 25.7 Supporting Action
 
 | Supporting Action | Shape / caller | Activation and boundary |

@@ -786,6 +786,15 @@ GUIHost在正式bound video session接受当前target/current epoch的首个有�
 
 Direct lockdown 与 legacy developer 共用一个 Runtime-coordinated process slot；一进程只执行一个 OneShot，cleanup 后退出。
 
+Runtime 启动的 CoreDeviceHelper 和 DirectHelper OneShot 必须共同遵守父进程 lifetime：fd 3
+为只读 lifetime pipe，fd 4 为继承的 generation lock。独立 facts 模式不使用此协议。
+lifetime EOF 或读取失败后立即取消 session admission；已经开始的操作与 backend cleanup 仍在同一
+执行线程顺序完成，禁止 lifetime watcher 并发调用 backend Close。Helper 进程入口给予最多 2 秒
+退场时间，期限覆盖当前操作和 cleanup；超过期限直接以非零状态退出进程，由内核关闭全部描述符并
+释放 lease。退出不表示已提交的设备操作被回滚，也不得自动重放该操作。
+正常 session 完成后先停止并回收 lifetime watcher，再按 session 原始退出码结束；watcher 不得
+调用 os.Exit 覆盖协议或 cleanup 错误。阻塞的设备操作不能阻塞最终进程退出。
+
 ### 23.2 HelperWire framing
 
 UTF-8 JSONL，每行：
