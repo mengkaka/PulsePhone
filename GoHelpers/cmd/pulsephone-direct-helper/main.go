@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 	"syscall"
 
 	"pulsephone/GoHelpers/internal/direct"
+	"pulsephone/GoHelpers/internal/helperapp"
 	"pulsephone/GoHelpers/internal/processidentity"
 )
 
@@ -15,6 +17,10 @@ func main() {
 }
 
 func run() int {
+	return runWithOwner(helperapp.RunOwned)
+}
+
+func runWithOwner(owner func(*os.File, func(context.Context) int) int) int {
 	flags := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	mode := flags.String("mode", "", "facts or oneshot")
@@ -48,5 +54,7 @@ func run() int {
 		*processStartIdentity = identity
 	}
 	_ = connectionEpoch
-	return direct.RunOneShot(os.Stdin, os.Stdout, direct.OneShotConfig{RuntimeEpoch: *runtimeEpoch, ConnectionEpoch: *connectionEpoch, ExecutorGeneration: *executorGeneration, RawTransportUDID: *rawTransportUDID, HelperBuildID: *helperBuildID, ManifestHash: *manifestHash, ProcessStartIdentity: *processStartIdentity})
+	return owner(os.Stdin, func(ctx context.Context) int {
+		return direct.RunOneShot(os.Stdin, os.Stdout, direct.OneShotConfig{Context: ctx, RuntimeEpoch: *runtimeEpoch, ConnectionEpoch: *connectionEpoch, ExecutorGeneration: *executorGeneration, RawTransportUDID: *rawTransportUDID, HelperBuildID: *helperBuildID, ManifestHash: *manifestHash, ProcessStartIdentity: *processStartIdentity})
+	})
 }

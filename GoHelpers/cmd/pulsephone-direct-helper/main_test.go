@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"regexp"
 	"strings"
@@ -73,7 +74,9 @@ func TestRunDerivesProcessIdentityBeforeHello(t *testing.T) {
 		os.Args, os.Stdin, os.Stdout = previousArgs, previousStdin, previousStdout
 	}()
 	t.Setenv("HOME", t.TempDir())
-	if status := run(); status != 1 {
+	if status := runWithOwner(func(_ *os.File, body func(context.Context) int) int {
+		return body(context.Background())
+	}); status != 1 {
 		t.Fatalf("status = %d, want 1 for fixture dispatch", status)
 	}
 	if _, err := output.Seek(0, 0); err != nil {

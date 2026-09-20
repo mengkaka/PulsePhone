@@ -683,10 +683,11 @@ func TestClassicRouteMountMatchesLegacyOrderAndCleanup(t *testing.T) {
 func TestClassicRouteMountDeadlineProjectsTypedFailure(t *testing.T) {
 	store := createClassicRouteTestStore(t)
 	events := []string{}
+	serverEvents := []string{}
 	client, server := net.Pipe()
 	serverResult := make(chan error, 1)
 	go func() {
-		serverResult <- serveClassicRouteMountUntilClientCloses(server, store.image, store.signature, &events)
+		serverResult <- serveClassicRouteMountUntilClientCloses(server, store.image, store.signature, &serverEvents)
 	}()
 	lockdown := &classicRouteTestLockdown{
 		events:  &events,

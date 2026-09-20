@@ -2,6 +2,7 @@ package helperapp
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -27,8 +28,7 @@ type Config struct {
 	HandleFrame          func(protocol.Message) error
 	HandleStreamClose    func(protocol.Message) *RequestResult
 	Close                func() error
-	Lifetime             io.Reader
-	LifetimeExit         func()
+	Context              context.Context
 }
 
 type RequestResult struct {
@@ -63,20 +63,12 @@ func RunSession(stdin io.Reader, stdout io.Writer, config Config) (status int) {
 			status = 2
 		}
 	}()
-	if config.Lifetime != nil {
-		go func() {
-			_, _ = io.Copy(io.Discard, config.Lifetime)
-			closeSession()
-			if config.LifetimeExit != nil {
-				config.LifetimeExit()
-				return
-			}
-			os.Exit(0)
-		}()
-	}
 
 	machine := protocol.NewWireMachine(config.RuntimeEpoch, config.ExecutorGeneration)
 	send := func(fields map[string]any, direction protocol.Direction) error {
+		if err := sessionCancelled(config.Context); err != nil {
+			return err
+		}
 		raw, err := protocol.EncodeLine(fields, direction)
 		if err != nil {
 			return err
@@ -111,8 +103,14 @@ func RunSession(stdin io.Reader, stdout io.Writer, config Config) (status int) {
 	reader := bufio.NewReaderSize(stdin, protocol.MaxHelperLineBytes+1)
 	var pendingBarrierResult *RequestResult
 	receive := func() (protocol.Message, error) {
+		if err := sessionCancelled(config.Context); err != nil {
+			return protocol.Message{}, err
+		}
 		raw, err := protocol.ReadHelperLine(reader)
 		if err != nil {
+			return protocol.Message{}, err
+		}
+		if err := sessionCancelled(config.Context); err != nil {
 			return protocol.Message{}, err
 		}
 		message, err := protocol.DecodeLine(raw, protocol.RuntimeToHelper)

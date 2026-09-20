@@ -17,6 +17,7 @@ import (
 )
 
 type OneShotConfig struct {
+	Context              context.Context
 	RuntimeEpoch         uint64
 	ConnectionEpoch      uint64
 	ExecutorGeneration   uint64
@@ -33,11 +34,17 @@ func RunOneShot(stdin io.Reader, stdout io.Writer, config OneShotConfig) int {
 type oneShotRoute func(config OneShotConfig, request protocol.Message) (map[string]any, int)
 
 func runOneShotWithRoute(stdin io.Reader, stdout io.Writer, config OneShotConfig, route oneShotRoute) int {
+	if config.Context == nil {
+		config.Context = context.Background()
+	}
 	machine := protocol.NewWireMachine(config.RuntimeEpoch, config.ExecutorGeneration)
 	base := func(kind string) map[string]any {
 		return map[string]any{"executorGeneration": config.ExecutorGeneration, "messageID": newUUID(), "runtimeEpoch": config.RuntimeEpoch, "schemaVersion": int64(1), "type": kind}
 	}
 	send := func(fields map[string]any) error {
+		if err := config.Context.Err(); err != nil {
+			return err
+		}
 		raw, err := protocol.EncodeLine(fields, protocol.HelperToRuntime)
 		if err != nil {
 			return err
@@ -62,8 +69,14 @@ func runOneShotWithRoute(stdin io.Reader, stdout io.Writer, config OneShotConfig
 	}
 	reader := bufio.NewReaderSize(stdin, protocol.MaxHelperLineBytes+1)
 	receive := func() (protocol.Message, error) {
+		if err := config.Context.Err(); err != nil {
+			return protocol.Message{}, err
+		}
 		raw, err := protocol.ReadHelperLine(reader)
 		if err != nil {
+			return protocol.Message{}, err
+		}
+		if err := config.Context.Err(); err != nil {
 			return protocol.Message{}, err
 		}
 		message, err := protocol.DecodeLine(raw, protocol.RuntimeToHelper)

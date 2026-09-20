@@ -139,7 +139,8 @@ public final class RuntimeListener: @unchecked Sendable {
         component: String,
         baseDirectoryPath: String,
         watchQueue: DispatchQueue,
-        onWatchFailure: @escaping @Sendable (RuntimeSocketWatchFailure) -> Void
+        onWatchFailure: @escaping @Sendable (RuntimeSocketWatchFailure) -> Void,
+        afterStagingBind: () throws -> Void = {}
     ) throws -> RuntimeListener {
         guard runtimeLock.canonicalUDID == canonicalUDID else {
             throw RuntimeListenerError.targetLockMismatch
@@ -156,6 +157,18 @@ public final class RuntimeListener: @unchecked Sendable {
             expectedOwner: geteuid()
         )
         try baseDirectory.removeStaleSocketIfPresent(component: component)
+        let stagingComponent = canonicalUDID.domainSeparatedHash + ".bind"
+        let stagingPath = baseDirectoryPath + "/" + stagingComponent
+        // Only the generation lease holder touches this unpublished endpoint.
+        do {
+            let stale = try RuntimeSocketIdentity.captureBoundNode(
+                path: stagingPath, expectedOwner: geteuid()
+            )
+            try baseDirectory.removeBoundSocket(
+                component: stagingComponent, expectedIdentity: stale
+            )
+        } catch RuntimeListenerError.systemCall(_, let code) where code == ENOENT {
+        }
         let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else {
             throw RuntimeListenerError.systemCall(
@@ -164,9 +177,10 @@ public final class RuntimeListener: @unchecked Sendable {
             )
         }
         var boundIdentity: RuntimeSocketIdentity?
+        var boundComponent = stagingComponent
         do {
             try setCloseOnExec(descriptor)
-            var address = try makeAddress(path: socketPath)
+            var address = try makeAddress(path: stagingPath)
             let addressLength = socklen_t(address.sun_len)
             let bindResult = withUnsafePointer(to: &address) { pointer in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -184,12 +198,13 @@ public final class RuntimeListener: @unchecked Sendable {
                 )
             }
             boundIdentity = try RuntimeSocketIdentity.captureBoundNode(
-                path: socketPath,
+                path: stagingPath,
                 expectedOwner: geteuid()
             )
+            try afterStagingBind()
             guard fchmodat(
                 baseDirectory.fileDescriptor,
-                component,
+                stagingComponent,
                 0o600,
                 AT_SYMLINK_NOFOLLOW
             ) == 0 else {
@@ -199,7 +214,7 @@ public final class RuntimeListener: @unchecked Sendable {
                 )
             }
             let identity = try RuntimeSocketIdentity.capture(
-                path: socketPath,
+                path: stagingPath,
                 expectedOwner: geteuid()
             )
             guard identity.device == boundIdentity?.device,
@@ -213,6 +228,16 @@ public final class RuntimeListener: @unchecked Sendable {
                     errno: errno
                 )
             }
+            try runtimeLock.validateStablePathIdentity()
+            guard renameatx_np(
+                baseDirectory.fileDescriptor, stagingComponent,
+                baseDirectory.fileDescriptor, component, UInt32(RENAME_EXCL)
+            ) == 0 else {
+                throw RuntimeListenerError.systemCall(
+                    operation: "publish-runtime-socket", errno: errno
+                )
+            }
+            boundComponent = component
             let watch = try RuntimeSocketWatch(
                 baseDirectoryPath: baseDirectoryPath,
                 socketPath: socketPath,
@@ -235,7 +260,7 @@ public final class RuntimeListener: @unchecked Sendable {
             _ = Darwin.close(descriptor)
             if let boundIdentity {
                 try? baseDirectory.removeBoundSocket(
-                    component: component,
+                    component: boundComponent,
                     expectedIdentity: boundIdentity
                 )
             }

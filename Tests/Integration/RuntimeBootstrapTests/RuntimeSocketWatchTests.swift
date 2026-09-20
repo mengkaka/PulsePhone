@@ -7,6 +7,58 @@ import XCTest
 import PulsePhoneSharedDefinitions
 
 final class RuntimeSocketWatchTests: XCTestCase {
+    func testSocketIsNotPublishedUntilPermissionsAndListenerAreReady() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(atPath: fixture.basePath) }
+        let stagingPath = fixture.basePath + "/" + fixture.target.domainSeparatedHash + ".bind"
+        let listener = try RuntimeListener.bind(
+            for: fixture.target, whileHolding: fixture.runtimeLock,
+            socketPath: fixture.socketPath, component: fixture.component,
+            baseDirectoryPath: fixture.basePath, watchQueue: fixture.queue,
+            onWatchFailure: { _ in }, afterStagingBind: {
+                XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.socketPath))
+                XCTAssertTrue(FileManager.default.fileExists(atPath: stagingPath))
+            }
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagingPath))
+        XCTAssertEqual(nodeMode(at: fixture.socketPath), 0o600)
+        try connect(to: fixture.socketPath)
+        try listener.shutdownExpected()
+    }
+
+    func testInterruptedStagingBindRecoversWithNonfinalPermissions() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(atPath: fixture.basePath) }
+        let stagingPath = fixture.basePath + "/" + fixture.target.domainSeparatedHash + ".bind"
+        let stale = try bindRawSocket(at: stagingPath)
+        XCTAssertEqual(chmod(stagingPath, 0o755), 0)
+        _ = Darwin.close(stale)
+        let listener = try fixture.bind { _ in }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagingPath))
+        try connect(to: fixture.socketPath)
+        try listener.shutdownExpected()
+    }
+
+    func testStagingRejectsForeignFileAndPublicationNeverOverwrites() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(atPath: fixture.basePath) }
+        let stagingPath = fixture.basePath + "/" + fixture.target.domainSeparatedHash + ".bind"
+        try Data("foreign".utf8).write(to: URL(fileURLWithPath: stagingPath))
+        XCTAssertThrowsError(try fixture.bind { _ in })
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: stagingPath)), Data("foreign".utf8))
+        try FileManager.default.removeItem(atPath: stagingPath)
+        XCTAssertThrowsError(try RuntimeListener.bind(
+            for: fixture.target, whileHolding: fixture.runtimeLock,
+            socketPath: fixture.socketPath, component: fixture.component,
+            baseDirectoryPath: fixture.basePath, watchQueue: fixture.queue,
+            onWatchFailure: { _ in }, afterStagingBind: {
+                try Data("replacement".utf8).write(to: URL(fileURLWithPath: fixture.socketPath))
+            }
+        ))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: fixture.socketPath)), Data("replacement".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagingPath))
+    }
+
     private struct FixtureInput: Decodable {
         let scenarios: [String]
     }
