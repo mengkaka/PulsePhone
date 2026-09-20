@@ -18,16 +18,8 @@ func RunOwned(input *os.File, run func(context.Context) int) int {
 		syscall.Fstat(4, &leaseStat) != nil || leaseStat.Mode&syscall.S_IFMT != syscall.S_IFREG {
 		return 2
 	}
-	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, 3, syscall.F_GETFL, 0)
-	if errno != 0 || flags&syscall.O_ACCMODE != syscall.O_RDONLY {
-		return 2
-	}
-	// Nonblocking pipes are registered with Go's poller, so Close wakes Read.
-	if syscall.SetNonblock(3, true) != nil {
-		return 2
-	}
-	syscall.CloseOnExec(3)
-	syscall.CloseOnExec(4)
+	// Keep the lifetime pipe blocking. EOF from the parent is the ownership
+	// signal; the process entry point closes it during normal teardown.
 	lifetime := os.NewFile(3, "runtime-lifetime")
 	return runOwned(lifetime, input, RuntimeLossExitTimeout, run)
 }
@@ -37,9 +29,7 @@ func runOwned(lifetime *os.File, input *os.File, timeout time.Duration, run func
 	defer cancel()
 	stopped := make(chan struct{})
 	lost := make(chan struct{})
-	monitorDone := make(chan struct{})
 	go func() {
-		defer close(monitorDone)
 		var byte [1]byte
 		// The lifetime channel carries no messages; data is also a protocol fault.
 		_, _ = lifetime.Read(byte[:])
@@ -54,7 +44,6 @@ func runOwned(lifetime *os.File, input *os.File, timeout time.Duration, run func
 	defer func() {
 		close(stopped)
 		_ = lifetime.Close()
-		<-monitorDone
 	}()
 	result := make(chan int, 1)
 	go func() { result <- run(ctx) }()
