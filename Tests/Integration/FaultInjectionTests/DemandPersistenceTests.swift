@@ -101,7 +101,9 @@ final class DemandPersistenceTests: XCTestCase {
             lifecycleState: &lifecycle,
             inhibitors: &inhibitors
         )
-        XCTAssertEqual(release.idleReevaluation, .quiescing(.automaticIdle))
+        XCTAssertEqual(release.idleReevaluation, .notIdle(until: try threshold.advanced(
+            by: RuntimeIdleCoordinator.automaticIdleInterval
+        )))
         XCTAssertEqual(input.ownerKind, ShutdownInhibitorKind.assetAcquisition.rawValue)
         XCTAssertEqual(input.releaseEvent, "assetPublished")
         XCTAssertEqual(input.deviceLeaseHeld, expected.deviceLeaseHeldDuringDownload)

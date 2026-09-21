@@ -9058,6 +9058,35 @@ final class ProductionRuntimeAssemblyTests: XCTestCase {
         XCTAssertNil(errors.error)
     }
 
+    func testRuntimeAutomaticallyStopsAfterBlockerFreeIdleGrace() throws {
+        let target = try CanonicalUDID(
+            canonicalString: "M2031-IDLE-\(UUID().uuidString)"
+        )
+        let backend = ProductionRuntimeOperationBackend(
+            handler: { _ in .failed(code: "invalidArgument") }
+        )
+        let server = try ProductionRuntimeServer.testing(
+            canonicalUDID: target,
+            runtimeEpoch: 44,
+            operationBackend: backend,
+            connectionTimeoutSeconds: 1,
+            idleGraceNanoseconds: 50_000_000
+        )
+        let stopped = expectation(description: "runtime stopped")
+        let errors = LockedErrorStore()
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { stopped.fulfill() }
+            do { try server.run() } catch { errors.store(error) }
+        }
+
+        try waitForNode(try RuntimeSocketPath.current(for: target).path)
+        wait(for: [stopped], timeout: 3)
+        XCTAssertNil(errors.error)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: try RuntimeSocketPath.current(for: target).path
+        ))
+    }
+
     func testRealSocketPublishesCrossClientPointerObservation() throws {
         let target = try CanonicalUDID(
             canonicalString: "M2031-OBSERVATION-\(UUID().uuidString)"

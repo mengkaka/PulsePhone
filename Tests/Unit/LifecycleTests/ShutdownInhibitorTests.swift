@@ -149,13 +149,13 @@ final class ShutdownInhibitorTests: XCTestCase {
         )
         XCTAssertEqual(
             finalRelease.idleReevaluation,
-            .quiescing(.automaticIdle)
+            .notIdle(until: instant(minutes: 21))
         )
-        XCTAssertEqual(lifecycleState, .quiescing)
-        XCTAssertFalse(registry.snapshot.acceptingNewTokens)
+        XCTAssertEqual(lifecycleState, .ready)
+        XCTAssertTrue(registry.snapshot.acceptingNewTokens)
         XCTAssertEqual(uint(expected["validatedPrepareRefreshCount"]), 1)
         XCTAssertEqual(uint(expected["progressRefreshCount"]), 0)
-        XCTAssertEqual(bool(expected["lastReleaseTriggersQuiesce"]), true)
+        XCTAssertEqual(bool(expected["lastReleaseStartsIdleGrace"]), true)
     }
 
     private func uuid(_ value: Int) throws -> CanonicalUUID {

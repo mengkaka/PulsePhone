@@ -59,6 +59,7 @@ public struct RuntimeIdleCoordinator: Sendable {
     private let runtimeReadyAt: MonotonicInstant
     private let idleInterval: MonotonicDuration
     private var lastCLIActivityAt: MonotonicInstant?
+    private var lastBlockerReleasedAt: MonotonicInstant?
 
     public init(
         runtimeReadyAt: MonotonicInstant,
@@ -70,7 +71,7 @@ public struct RuntimeIdleCoordinator: Sendable {
     }
 
     public var snapshot: RuntimeIdleSnapshot {
-        let reference = lastCLIActivityAt ?? runtimeReadyAt
+        let reference = max(lastCLIActivityAt ?? runtimeReadyAt, lastBlockerReleasedAt ?? runtimeReadyAt)
         return RuntimeIdleSnapshot(
             runtimeReadyAt: runtimeReadyAt,
             lastCLIActivityAt: lastCLIActivityAt,
@@ -89,7 +90,7 @@ public struct RuntimeIdleCoordinator: Sendable {
         else {
             return .ignored
         }
-        let reference = lastCLIActivityAt ?? runtimeReadyAt
+        let reference = snapshot.idleReferenceAt
         guard instant >= reference else {
             throw RuntimeIdleCoordinatorError.clockMovedBackwards
         }
@@ -153,6 +154,11 @@ public struct RuntimeIdleCoordinator: Sendable {
                 idleReevaluation: nil
             )
         }
+        guard instant >= snapshot.idleReferenceAt else {
+            throw RuntimeIdleCoordinatorError.clockMovedBackwards
+        }
+        _ = try instant.advanced(by: idleInterval)
+        lastBlockerReleasedAt = instant
         let reevaluation = try attemptQuiesce(
             trigger: .automaticIdle,
             at: instant,

@@ -4,6 +4,7 @@ import Foundation
 import OSLog
 import PulsePhoneHostPaths
 import PulsePhoneRuntimeKernel
+import PulsePhoneRuntimeState
 import PulsePhoneSharedDefinitions
 import PulsePhoneWire
 
@@ -244,7 +245,9 @@ final class ProductionCoreDeviceHelperExecutor: @unchecked Sendable {
         let deliveryAttemptID: String
         let interactionID: CanonicalUUID
         let routeID: String
+        let ownerClientInstanceID: CanonicalUUID?
         var lastAcceptedSequence: UInt64?
+        var lifecycleToken: ShutdownInhibitorToken?
     }
 
     private final class ActiveHelper {
@@ -403,6 +406,12 @@ final class ProductionCoreDeviceHelperExecutor: @unchecked Sendable {
             mode: .direct,
             supervisorRegistry: supervisorRegistry
         )
+    }
+
+    private var lifecycle: RuntimeLifecycleController?
+
+    func bindLifecycle(_ controller: RuntimeLifecycleController) {
+        lock.withLock { lifecycle = controller }
     }
 
     func bind(runtimeLock: RuntimeLock, manifestStore: HelperManifestStore) {
@@ -743,7 +752,8 @@ final class ProductionCoreDeviceHelperExecutor: @unchecked Sendable {
         routeID: String,
         streamPayload: [String: HelperWireJSONValue],
         device: ProductionRuntimeDeviceObservation,
-        connectionEpoch: UInt64
+        connectionEpoch: UInt64,
+        ownerClientInstanceID: CanonicalUUID? = nil
     ) throws -> (sessionID: CanonicalUUID, executorGeneration: UInt64) {
         let reservesKeyboardResource = try beginKeyboardStreamOpen(routeID: routeID)
         var committedKeyboardSessionID: String?
@@ -760,6 +770,13 @@ final class ProductionCoreDeviceHelperExecutor: @unchecked Sendable {
             operation: .streamOpen
         )
         let sessionID = CanonicalUUID(value: UUID())
+        let lifecycleToken = try lifecycle?.openStream(
+            sessionID: sessionID, interactionID: interactionID, commandID: routeID
+        )
+        var registered = false
+        defer {
+            if !registered, let lifecycleToken { try? lifecycle?.release(lifecycleToken) }
+        }
         let deliveryAttemptID = Self.streamDeliveryAttemptID(sessionID: sessionID)
         var payload: [String: HelperWireJSONValue] = [
             "actionID": .string(actionID.canonicalString),
@@ -803,8 +820,11 @@ final class ProductionCoreDeviceHelperExecutor: @unchecked Sendable {
             deliveryAttemptID: deliveryAttemptID,
             interactionID: interactionID,
             routeID: routeID,
-            lastAcceptedSequence: nil
+            ownerClientInstanceID: ownerClientInstanceID,
+            lastAcceptedSequence: nil,
+            lifecycleToken: lifecycleToken
         )
+        registered = true
         if reservesKeyboardResource {
             commitKeyboardStreamOpen(sessionID: sessionID.canonicalString)
             committedKeyboardSessionID = sessionID.canonicalString
@@ -927,6 +947,7 @@ final class ProductionCoreDeviceHelperExecutor: @unchecked Sendable {
             throw error
         }
         helper.streams.removeValue(forKey: sessionID.canonicalString)
+        defer { if let token = stream.lifecycleToken { try? lifecycle?.release(token) } }
         if stream.routeID == "coredevice.keyboardStream" {
             endKeyboardStream(sessionID: sessionID.canonicalString)
         }
@@ -936,6 +957,26 @@ final class ProductionCoreDeviceHelperExecutor: @unchecked Sendable {
             stream.lastAcceptedSequence,
             cancel ? "cancelled" : "closed"
         )
+    }
+
+    func cancelStreamsOwnedBy(_ ownerClientInstanceID: CanonicalUUID) {
+        let streams: [(sessionID: CanonicalUUID, interactionID: CanonicalUUID)] = lock.withLock {
+            guard let active else { return [] }
+            return active.streams.compactMap { sessionID, stream in
+                guard stream.ownerClientInstanceID == ownerClientInstanceID,
+                      let sessionID = try? CanonicalUUID(sessionID)
+                else { return nil }
+                return (sessionID, stream.interactionID)
+            }
+        }
+        for stream in streams {
+            _ = try? closeStream(
+                sessionID: stream.sessionID,
+                interactionID: stream.interactionID,
+                reason: "clientDisconnected",
+                cancel: true
+            )
+        }
     }
 
     func markLiveCaptureReady(
@@ -1409,6 +1450,11 @@ final class ProductionCoreDeviceHelperExecutor: @unchecked Sendable {
 
     private func stopActiveHelper(force: Bool = false) {
         guard let helper = active else { return }
+        defer {
+            for stream in helper.streams.values {
+                if let token = stream.lifecycleToken { try? lifecycle?.release(token) }
+            }
+        }
         active = nil
         resetKeyboardStreams()
         if force {

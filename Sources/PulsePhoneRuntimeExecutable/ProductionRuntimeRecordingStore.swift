@@ -3,6 +3,7 @@ import Foundation
 import PulsePhoneClientCore
 import PulsePhoneHostPaths
 import PulsePhoneLogging
+import PulsePhoneRuntimeState
 import PulsePhoneSharedDefinitions
 
 enum ProductionRuntimeRecordingError: Error, Equatable {
@@ -63,6 +64,12 @@ final class ProductionRuntimeRecordingStore: @unchecked Sendable {
     private var diagnostics: ActiveDiagnostics?
     private var revision: UInt64 = 0
     private var trace: ActiveTrace?
+    private var lifecycle: RuntimeLifecycleController?
+    private var traceToken: ShutdownInhibitorToken?
+
+    func bindLifecycle(_ controller: RuntimeLifecycleController) {
+        lock.withLock { lifecycle = controller }
+    }
 
     init(
         traceDirectory: AnchoredDirectory,
@@ -183,6 +190,8 @@ final class ProductionRuntimeRecordingStore: @unchecked Sendable {
             guard trace == nil else {
                 throw ProductionRuntimeRecordingError.traceAlreadyActive
             }
+            traceToken = try lifecycle?.acquire(kind: .activeTrace, commandID: "trace.start")
+            defer { releaseTraceTokenIfInactive() }
             let traceID = CanonicalUUID(value: UUID())
             let file: AnchoredRegularFile
             do {
@@ -555,7 +564,15 @@ final class ProductionRuntimeRecordingStore: @unchecked Sendable {
     }
 
     private func advanceRevision() {
+        releaseTraceTokenIfInactive()
         revision = revision == UInt64.max ? UInt64.max : revision + 1
+    }
+
+    private func releaseTraceTokenIfInactive() {
+        if trace == nil, let traceToken {
+            try? lifecycle?.release(traceToken)
+            self.traceToken = nil
+        }
     }
 
     private func writeFailure(

@@ -187,6 +187,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
     private let elementSnapshotPipeline: ProductionElementSnapshotPipeline?
     private let recordingStore: ProductionRuntimeRecordingStore?
     private let screenshotStore: ProductionScreenshotArtifactStore?
+    private var preparationJobs: ProductionPreparationJobManager? = nil
   private let pointerObservationSink: ProductionRuntimePointerObservationSink?
     private static let toolbarLatencyLogger = Logger(
         subsystem: "com.pulsephone.PulsePhoneRuntime",
@@ -300,6 +301,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         screenshotStore: ProductionScreenshotArtifactStore,
         coordinateProjectionStore: ProductionRuntimeCoordinateProjectionStore,
         pointerObservationSink: ProductionRuntimePointerObservationSink,
+        preparationJobs: ProductionPreparationJobManager? = nil,
         captureReadyHandler: @escaping CaptureReadyHandler,
         handler: @escaping ContextualHandler
     ) {
@@ -314,6 +316,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         self.recordingStore = recordingStore
         self.screenshotStore = screenshotStore
         self.pointerObservationSink = pointerObservationSink
+        self.preparationJobs = preparationJobs
     }
 
     public func handle(
@@ -537,6 +540,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             screenshotStore: screenshotStore,
             coordinateProjectionStore: coordinateProjectionStore,
             pointerObservationSink: pointerObservationSink,
+            preparationJobs: preparationJobs,
             captureReadyHandler: { connectionEpoch, _ in
                 let snapshot = try coordinator.refresh()
                 guard snapshot.connectionEpoch == connectionEpoch,
@@ -639,6 +643,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             case .streamOpen:
                 return try executeStreamOpen(
                     request,
+                    ownerClientInstanceID: clientInstanceID,
                     coordinator: coordinator,
                     helperExecutor: helperExecutor,
                     coordinateProjectionStore: coordinateProjectionStore,
@@ -811,6 +816,13 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         }
     }
 
+    func bindLifecycle(_ lifecycle: RuntimeLifecycleController) {
+        preparationJobs?.bindLifecycle(lifecycle)
+        helperExecutor?.bindLifecycle(lifecycle)
+        directHelperExecutor?.bindLifecycle(lifecycle)
+        recordingStore?.bindLifecycle(lifecycle)
+    }
+
     func bind(
         runtimeLock: RuntimeLock,
         manifestStore: HelperManifestStore
@@ -831,6 +843,11 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         directHelperExecutor?.shutdown()
         elementSnapshotPipeline?.shutdown()
         screenshotStore?.shutdown()
+    }
+
+    func cancelStreamsOwnedBy(_ clientInstanceID: CanonicalUUID) {
+        helperExecutor?.cancelStreamsOwnedBy(clientInstanceID)
+        directHelperExecutor?.cancelStreamsOwnedBy(clientInstanceID)
     }
 
     func recordingSnapshot() -> ProductionRuntimeRecordingSnapshot? {
@@ -2614,6 +2631,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
 
     static func executeStreamOpen(
         _ request: RuntimeRequestEnvelope,
+        ownerClientInstanceID: CanonicalUUID? = nil,
         coordinator: ProductionRuntimeDeviceCoordinator,
         helperExecutor: ProductionCoreDeviceHelperExecutor,
         coordinateProjectionStore: ProductionRuntimeCoordinateProjectionStore,
@@ -2776,7 +2794,8 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                     routeID: candidate.routeID,
                     streamPayload: try helperObject(arguments),
                     device: device,
-                    connectionEpoch: snapshot.connectionEpoch
+                    connectionEpoch: snapshot.connectionEpoch,
+                    ownerClientInstanceID: ownerClientInstanceID
                 )
                 if commandID == "gui.pointer.interaction" {
                     guard let geometry = snapshot.geometry else {
@@ -6429,6 +6448,7 @@ final class ProductionRuntimePeerContext: @unchecked Sendable {
 
     private let liveLock = NSLock()
     private var liveState = ProductionRuntimePeerLiveState()
+    private var liveLifecycleToken: ShutdownInhibitorToken?
     private let outboundLock = NSLock()
 
     init(
@@ -6457,6 +6477,17 @@ final class ProductionRuntimePeerContext: @unchecked Sendable {
         liveLock.withLock { liveState }
     }
 
+    func setLiveLifecycleToken(_ token: ShutdownInhibitorToken?) {
+        liveLock.withLock { liveLifecycleToken = token }
+    }
+
+    func takeLiveLifecycleToken() -> ShutdownInhibitorToken? {
+        liveLock.withLock {
+            defer { liveLifecycleToken = nil }
+            return liveLifecycleToken
+        }
+    }
+
     func withOutbound<T>(
         _ body: (RuntimeConnection, Int32) throws -> T
     ) rethrows -> T {
@@ -6481,6 +6512,7 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
     private let compatibility: RuntimeCompatibilityIdentity
     private let runtimeEpoch: UInt64
     private let runtimeRegistry = RuntimeOutstandingRegistry()
+    private let lifecycleController: RuntimeLifecycleController
     private let stateLock = NSLock()
     private static let reconnectLogger = Logger(
         subsystem: "com.pulsephone.PulsePhoneRuntime",
@@ -6518,13 +6550,19 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
     private var stopping = false
     private var usbMonitor: (any ProductionUSBDeviceMonitoring)?
 
+    private final class LifecycleStopSink: @unchecked Sendable {
+        weak var server: ProductionRuntimeServer?
+        func stop() { server?.requestStop() }
+    }
+
     public init(
         canonicalUDID: CanonicalUDID,
         compatibility: RuntimeCompatibilityIdentity,
         runtimeEpoch: UInt64,
         operationBackend: ProductionRuntimeOperationBackend,
         connectionTimeoutSeconds: Int = ProductionRuntimeServer
-            .connectionTimeoutSeconds
+            .connectionTimeoutSeconds,
+        idleGraceNanoseconds: UInt64 = RuntimeLifecycleController.defaultIdleGraceNanoseconds
     ) {
         let observationBroker = try! ProductionRuntimeObservationBroker()
         self.canonicalUDID = canonicalUDID
@@ -6534,6 +6572,10 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
         self.operationBackend = operationBackend
         self.observationBroker = observationBroker
         self.usbMonitor = nil
+        let stopSink = LifecycleStopSink()
+        self.lifecycleController = RuntimeLifecycleController(idleGraceNanoseconds: idleGraceNanoseconds) {
+            stopSink.stop()
+        }
         self.operationBackend.installPointerObservationHandler {
             [weak observationBroker] clientInstanceID, interactionID, plan in
             observationBroker?.publishAccepted(
@@ -6542,6 +6584,8 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
                 plan: plan
             )
         }
+        stopSink.server = self
+        operationBackend.bindLifecycle(lifecycleController)
     }
 
     public static func bundled(
@@ -6572,7 +6616,8 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
         runtimeEpoch: UInt64 = 1,
         operationBackend: ProductionRuntimeOperationBackend? = nil,
         connectionTimeoutSeconds: Int = ProductionRuntimeServer
-            .connectionTimeoutSeconds
+            .connectionTimeoutSeconds,
+        idleGraceNanoseconds: UInt64 = RuntimeLifecycleController.defaultIdleGraceNanoseconds
     ) throws -> ProductionRuntimeServer {
         ProductionRuntimeServer(
             canonicalUDID: canonicalUDID,
@@ -6586,7 +6631,8 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
                     canonicalUDID: canonicalUDID,
                     runtimeEpoch: runtimeEpoch
                 ),
-            connectionTimeoutSeconds: connectionTimeoutSeconds
+            connectionTimeoutSeconds: connectionTimeoutSeconds,
+            idleGraceNanoseconds: idleGraceNanoseconds
         )
     }
 
@@ -6599,17 +6645,20 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
     runtimeEpoch: UInt64 = 1,
     operationBackend: ProductionRuntimeOperationBackend? = nil,
     connectionTimeoutSeconds: Int = ProductionRuntimeServer
-      .connectionTimeoutSeconds
+      .connectionTimeoutSeconds,
+    idleGraceNanoseconds: UInt64 = RuntimeLifecycleController.defaultIdleGraceNanoseconds
   ) throws -> ProductionRuntimeServer {
     try testing(
       canonicalUDID: canonicalUDID,
       runtimeEpoch: runtimeEpoch,
       operationBackend: operationBackend,
-      connectionTimeoutSeconds: connectionTimeoutSeconds
+      connectionTimeoutSeconds: connectionTimeoutSeconds,
+      idleGraceNanoseconds: idleGraceNanoseconds
     )
   }
 
     public func run(readiness: ReadinessFD? = nil) throws {
+        defer { lifecycleController.shutdown() }
         let runtimeLock = try RuntimeLock.acquireForRuntimeStartup(
             for: canonicalUDID
         )
@@ -6650,6 +6699,7 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
             runtimeEpoch: CanonicalUUID(value: UUID()),
             pid: getpid()
         )
+        lifecycleController.runtimeReady()
         try bound.withUnsafeListeningSocket { descriptor in
             while !isStopping {
                 let peer = Darwin.accept(descriptor, nil, nil)
@@ -6681,6 +6731,7 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
     }
 
     public func requestStop() {
+        lifecycleController.beginQuiescing()
         stateLock.lock()
         guard !stopping else {
             stateLock.unlock()
@@ -7048,6 +7099,8 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
         previousConnectionEpoch: UInt64,
         snapshot: ProductionRuntimeDeviceSnapshot
     ) throws {
+        let cleanup = try lifecycleController.acquire(kind: .cleanup)
+        defer { try? lifecycleController.release(cleanup) }
         endReattachSettling()
         Self.reconnectLogger.notice(
             "stage=detached connectionEpoch=\(previousConnectionEpoch, privacy: .public) stateRevision=\(snapshot.stateRevision, privacy: .public)"
@@ -7361,6 +7414,7 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
         )
         guard register(context) else { return }
         defer {
+            operationBackend.cancelStreamsOwnedBy(context.clientInstanceID)
             let liveState = context.liveSnapshot
             if let subscriptionID = liveState.subscriptionID {
                 observationBroker.stop(subscriptionID: subscriptionID)
@@ -7373,6 +7427,7 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
                     )
                 }
             }
+            if let token = context.takeLiveLifecycleToken() { try? lifecycleController.release(token) }
         }
         while !isStopping {
             let bytes: [UInt8]
@@ -7388,14 +7443,15 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
                 switch message {
                 case .bootstrap(let request):
                     let response = try bootstrapResponse(request)
+                    let stopAfterResponse = request.operation == .retireIfIdle && response.ok
+                    defer {
+                        if stopAfterResponse { requestStop() }
+                    }
                     try context.withOutbound { _, descriptor in
                         try writeAll(
                             BootstrapControlCodec.encodeResponse(response),
                             to: descriptor
                         )
-                    }
-                    if request.operation == .retireIfIdle, response.ok {
-                        requestStop()
                     }
                     return
                 case .streamFrame(let frame):
@@ -7404,13 +7460,50 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
                         clientInstanceID: context.clientInstanceID
                     )
                 case .request(let request):
+                    do {
                     if request.operation == .runtimeRecordLocalAction {
                         continue
                     }
+                    // Hold admission through backend completion AND response delivery.
+                    // Read-only observations neither acquire a token nor refresh grace.
+                    let operationToken: ShutdownInhibitorToken?
+                    if let kind = Self.lifecycleKind(for: request.operation) {
+                        do {
+                            operationToken = try lifecycleController.acquire(kind: kind)
+                        } catch {
+                            let code = error as? ShutdownInhibitorRegistryError == .admissionClosed
+                                ? "runtimeStopping" : "controlBusy"
+                            let payload = try object([
+                                ("operation", .string(request.operation.rawValue)),
+                                ("result", .object(try failed(code: code))),
+                            ])
+                            let envelope = try object([
+                                ("payload", .object(payload)),
+                                ("requestID", .string(request.requestID.canonicalString)),
+                                ("schemaVersion", .number(.uint64(1))),
+                            ])
+                            try context.withOutbound { connection, descriptor in
+                                _ = try connection.enqueueTerminalResponse(RuntimeWireFrame(
+                                    messageType: .response,
+                                    payload: RepositoryCanonicalJSON.encodeDocument(envelope)
+                                ), now: SystemMonotonicClock().now())
+                                try drain(connection: connection, to: descriptor)
+                            }
+                            continue
+                        }
+                    } else { operationToken = nil }
+                    defer { if let operationToken { try? lifecycleController.release(operationToken) } }
                     let preparationProgress = preparationProgressHandler(
                         requestID: request.requestID,
                         context: context
                     )
+                    if request.operation == .commandSubmit,
+                       helloEnvelope.role == .cli
+                    {
+                        lifecycleController.recordActivity(.validatedCLICommandIntent)
+                    } else if request.operation == .runtimePrepareCapabilities, helloEnvelope.role == .cli {
+                        lifecycleController.recordActivity(.acceptedPrepareCapabilities)
+                    }
           let response:
             (
                         artifact: (
@@ -7443,10 +7536,22 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
                             preparationProgress: preparationProgress
                         )
                     }
+                    defer {
+                        if response.stopAfterResponse { requestStop() }
+                    }
                     var liveTimeoutUpdate: Bool?
                     if request.operation == .runtimeAttachLive,
                        responseSucceeded(response.frame)
                     {
+                        if let liveState = context.liveSnapshot.liveOwnerID,
+                           let subscriptionID = context.liveSnapshot.subscriptionID
+                        {
+                            let token = try lifecycleController.attachLive(
+                                liveOwnerID: liveState,
+                                subscriptionID: subscriptionID
+                            )
+                            context.setLiveLifecycleToken(token)
+                        }
                         if Self.requestsPointerProjection(request),
                            let subscriptionID = context.liveSnapshot.subscriptionID
                         {
@@ -7460,6 +7565,9 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
                     } else if request.operation == .runtimeDetachLive,
                               responseSucceeded(response.frame)
                     {
+                        if let token = context.takeLiveLifecycleToken() {
+                            try? lifecycleController.release(token)
+                        }
                         if let subscriptionID = previousLiveState.subscriptionID {
                             observationBroker.stop(
                                 subscriptionID: subscriptionID
@@ -7493,8 +7601,8 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
                         )
                     }
                     if response.stopAfterResponse {
-                        requestStop()
                         return
+                    }
                     }
                 }
             }
@@ -7507,6 +7615,22 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
         operation == .runtimeAttachLive
             || operation == .runtimeDetachLive
             || operation == .runtimeMarkLiveCaptureReady
+    }
+
+    private static func lifecycleKind(for operation: RuntimeOperationID) -> ShutdownInhibitorKind? {
+        switch operation {
+        case .runtimeHealth, .runtimeRuntimeStatus, .runtimeGetAvailabilitySnapshot,
+             .runtimeStopIfIdle, .runtimeRecordLocalAction:
+            return nil
+        case .commandSubmit:
+            return .runningJob
+        case .runtimePrepareCapabilities:
+            return .preparingCapability
+        case .runtimeDetachLive, .streamClose, .streamCancel:
+            return .cleanup
+        default:
+            return .controlMutation
+        }
     }
 
     private static func requestsPointerProjection(
@@ -7661,7 +7785,7 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
         case .runtimeRuntimeStatus:
             result = try succeeded(value: runtimeStatus())
         case .runtimeStopIfIdle:
-            if operationBackend.recordingSnapshot()?.hasActiveTrace == true {
+            if !lifecycleController.attemptStop() {
                 result = try failed(code: "controlBusy")
                 break
             }
@@ -7913,7 +8037,8 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
             activePath: recording?.activeTracePath,
             idKey: "traceID"
         )
-        let stopBlockers = try recordingStopBlockers(recording)
+        let inhibitors = lifecycleController.blockerSnapshot
+        let stopBlockers = try lifecycleStopBlockers(from: inhibitors)
         return try object([
             ("assetAcquisitionSummaries", .array([])),
             ("canonicalUDID", .string(canonicalUDID.rawValue)),
@@ -7928,7 +8053,7 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
       ),
             ("diagnosticsSummary", .object(diagnosticsSummary)),
             ("executorSummary", .object(executorSummary)),
-            ("inhibitorRevision", .number(.uint64(recording?.revision ?? 0))),
+            ("inhibitorRevision", .number(.uint64(inhibitors.inhibitorRevision))),
             ("omittedAssetAcquisitionCount", .number(.uint64(0))),
             ("omittedPreparationCount", .number(.uint64(0))),
             ("operationSummary", .object(empty)),
@@ -7972,27 +8097,26 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
         return try object(members)
     }
 
-    private func recordingStopBlockers(
-        _ snapshot: ProductionRuntimeRecordingSnapshot?
+    private func lifecycleStopBlockers(
+        from snapshot: ShutdownInhibitorRegistrySnapshot
     ) throws -> [RepositoryJSONValue] {
-        guard snapshot?.hasActiveTrace == true else { return [] }
-    return [
-      .object(
-        try object([
-            ("commandID", .string("trace.start")),
-            ("count", .number(.uint64(1))),
-            ("kind", .string("activeTrace")),
-            ("retryWhen", .string("traceStopped")),
-            ("state", .string("active")),
-        ]))
-    ]
+        try snapshot.blockers.map { blocker in
+            var fields: [(String, RepositoryJSONValue)] = [
+                ("kind", .string(blocker.kind.rawValue)),
+                ("count", .number(.uint64(blocker.count))),
+                ("retryWhen", .string(blocker.retryWhen.rawValue)),
+            ]
+            if let command = blocker.commandID { fields.append(("commandID", .string(command))) }
+            if let state = blocker.state { fields.append(("state", .string(state))) }
+            return .object(try object(fields))
+        }
     }
 
     private func bootstrapResponse(
         _ request: BootstrapRequest
     ) throws -> BootstrapResponse {
         if request.operation == .retireIfIdle {
-            guard operationBackend.recordingSnapshot()?.hasActiveTrace != true else {
+            guard lifecycleController.attemptStop() else {
                 return BootstrapResponse(
                     requestID: request.requestID,
                     operation: request.operation,
@@ -8071,9 +8195,8 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
                 (
                     "blockersSummary",
           .array(
-            operationBackend.recordingSnapshot()?.hasActiveTrace == true
-                        ? [.string("activeTrace")]
-                        : [])
+            Set(lifecycleController.blockerSnapshot.blockers.map { $0.kind.rawValue })
+                .sorted().map { .string($0) })
                 ),
                 ("canonicalUDID", .string(canonicalUDID.rawValue)),
                 (

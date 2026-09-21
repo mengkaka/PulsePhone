@@ -2,6 +2,7 @@ import Dispatch
 import Foundation
 import PulsePhoneSharedDefinitions
 import PulsePhoneWire
+import PulsePhoneRuntimeState
 
 /// Runtime-owned preparation attempts. A request connection is only an
 /// observer; the attempt survives observer disconnects and is keyed by the
@@ -40,6 +41,7 @@ final class ProductionPreparationJobManager: @unchecked Sendable {
         var latestProgress: PreparationProgressV1?
         var observers = [CanonicalUUID: Observer]()
         var terminal: ProductionRuntimeBackendDisposition?
+        var lifecycleToken: ShutdownInhibitorToken?
 
         init(attemptID: CanonicalUUID, key: Key) {
             self.attemptID = attemptID
@@ -49,6 +51,11 @@ final class ProductionPreparationJobManager: @unchecked Sendable {
 
     private let lock = NSLock()
     private var jobs = [Key: Job]()
+    private var lifecycle: RuntimeLifecycleController?
+
+    func bindLifecycle(_ controller: RuntimeLifecycleController) {
+        lock.withLock { lifecycle = controller }
+    }
 
     /// `startOnly` returns immediately after starting or joining a job. An
     /// explicit observer blocks only on the shared Runtime terminal.
@@ -85,6 +92,17 @@ final class ProductionPreparationJobManager: @unchecked Sendable {
             shouldStart = true
         }
 
+        if shouldStart, let lifecycle {
+            do {
+                current.lifecycleToken = try lifecycle.acquire(
+                    kind: .preparingCapability, jobID: current.attemptID.canonicalString
+                )
+            } catch {
+                jobs.removeValue(forKey: key)
+                lock.unlock()
+                return .failed(code: "runtimeStopping")
+            }
+        }
         if mode == .waitForTerminal {
             let createdObserver = Observer(progress: progress)
             current.observers[observerID] = createdObserver
@@ -140,6 +158,10 @@ final class ProductionPreparationJobManager: @unchecked Sendable {
         let observers: [Observer] = lock.withLock {
             guard jobs[job.key] === job, job.terminal == nil else { return [] }
             job.terminal = result
+            if let token = job.lifecycleToken {
+                try? lifecycle?.release(token)
+                job.lifecycleToken = nil
+            }
             return Array(job.observers.values)
         }
         for observer in observers {

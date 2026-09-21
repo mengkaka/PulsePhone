@@ -148,7 +148,7 @@ final class RuntimeIdleTests: XCTestCase {
         )
         XCTAssertEqual(
             released.idleReevaluation,
-            .quiescing(.automaticIdle)
+            .notIdle(until: instant(minutes: 20))
         )
         XCTAssertEqual(bool(expected["assetAcquisitionUsesInhibitor"]), true)
         XCTAssertEqual(bool(expected["deviceLeaseHeldDuringDownload"]), false)
