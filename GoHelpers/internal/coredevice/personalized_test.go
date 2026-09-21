@@ -266,6 +266,69 @@ func TestCoreDevicePersonalizedMounterReopensServiceAfterManifestMiss(t *testing
 	}
 }
 
+func TestCoreDevicePersonalizedMounterQueryMountedTriesAllProvidersInOrder(t *testing.T) {
+	requests := []map[string]any{}
+	service := &fakeRawPersonalizedMounterService{
+		requests: &requests,
+		responses: []map[string]any{
+			{"ImagePresent": false},
+			{"ImageSignature": []any{}},
+			{"ImageSignature": []byte{}},
+			{
+				"Status": "Complete",
+				"EntryList": []any{map[string]any{
+					"IsMounted":                true,
+					"MountPath":                "/System/Developer",
+					"PersonalizedImageType":    "DeveloperDiskImage",
+					"PersonalizedImageVersion": "642.16",
+					"DiskImageType":            "Personalized",
+				}},
+			},
+		},
+	}
+	mounter := &CoreDevicePersonalizedMounter{service: service}
+
+	mounted, err := mounter.QueryMounted()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mounted.Present {
+		t.Fatal("expected CopyDevices to report a mounted image")
+	}
+	if len(requests) != 4 {
+		t.Fatalf("query count = %d, want 4", len(requests))
+	}
+	wantTypes := []any{"Personalized", "DeveloperDiskImage", "Developer", nil}
+	for index, want := range wantTypes {
+		if requests[index]["Command"] != map[bool]string{true: "LookupImage", false: "CopyDevices"}[index < 3] {
+			t.Fatalf("request %d command = %#v", index, requests[index])
+		}
+		if want != nil && requests[index]["ImageType"] != want {
+			t.Fatalf("request %d image type = %#v, want %#v", index, requests[index]["ImageType"], want)
+		}
+	}
+}
+
+func TestCoreDevicePersonalizedMounterQueryMountedReportsFalseWhenAllProvidersAreEmpty(t *testing.T) {
+	service := &fakeRawPersonalizedMounterService{
+		responses: []map[string]any{
+			{"ImagePresent": false},
+			{"ImagePresent": false},
+			{"ImagePresent": false},
+			{"Status": "Complete", "EntryList": []any{}},
+		},
+	}
+	mounter := &CoreDevicePersonalizedMounter{service: service}
+
+	mounted, err := mounter.QueryMounted()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mounted.Present {
+		t.Fatal("expected all providers to report an unmounted device")
+	}
+}
+
 func TestPersonalizedPayloadRejectsSecretMaterialWrongEpochAndRoles(t *testing.T) {
 	secret := personalizedTestPayload("queryMounted")
 	secret["deviceContext"] = map[string]any{"connectionEpoch": int64(21), "nonce": "secret"}
@@ -308,13 +371,25 @@ func TestCatalogIndependentMountedQueryDoesNotReadHostAssets(t *testing.T) {
 }
 
 type fakeRawPersonalizedMounterService struct {
-	events   *[]string
-	name     string
-	response map[string]any
+	events    *[]string
+	name      string
+	response  map[string]any
+	responses []map[string]any
+	requests  *[]map[string]any
 }
 
-func (service *fakeRawPersonalizedMounterService) SendReceivePlist(map[string]any, int) (map[string]any, error) {
-	*service.events = append(*service.events, service.name+".query")
+func (service *fakeRawPersonalizedMounterService) SendReceivePlist(request map[string]any, _ int) (map[string]any, error) {
+	if service.requests != nil {
+		*service.requests = append(*service.requests, request)
+	}
+	if service.events != nil {
+		*service.events = append(*service.events, service.name+".query")
+	}
+	if len(service.responses) != 0 {
+		response := service.responses[0]
+		service.responses = service.responses[1:]
+		return response, nil
+	}
 	return service.response, nil
 }
 
@@ -411,6 +486,41 @@ func TestPersonalizedSessionRequestTSSMountAndAlreadyMounted(t *testing.T) {
 		t.Fatalf("already-mounted path touched manifest: %#v fake=%#v", alreadyResult, alreadyMounted)
 	}
 
+	recoveryMounter := &fakePersonalizedMounter{
+		queryResults: []PersonalizedMountedImage{{Present: false}, {Present: false}, {Present: true}},
+		mountErr:     personalizedError("alreadyMounted"),
+	}
+	recoverySession := NewPersonalizedDeveloperSupportSession(store, func(string, time.Time) (PersonalizedMounter, error) {
+		return recoveryMounter, nil
+	}, &fakePersonalizedTSS{ticket: []byte("recovery-ticket")})
+	if _, err := recoverySession.Execute("raw-device", 21, requestPayload, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	recoveryResult, err := recoverySession.Execute("raw-device", 21, personalizedTestPayload("mount", reference), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveryResult["mountDisposition"] != "alreadyMounted" || recoveryResult["provenance"] != "mountedUnknownUnverified" || recoveryResult["servicesReady"] != true || !recoveryMounter.probed {
+		t.Fatalf("already-mounted recovery result = %#v mounter=%#v", recoveryResult, recoveryMounter)
+	}
+
+	failedRecoveryMounter := &fakePersonalizedMounter{
+		queryResults: []PersonalizedMountedImage{{Present: false}, {Present: false}, {Present: false}},
+		mountErr:     personalizedError("alreadyMounted"),
+	}
+	failedRecoverySession := NewPersonalizedDeveloperSupportSession(store, func(string, time.Time) (PersonalizedMounter, error) {
+		return failedRecoveryMounter, nil
+	}, &fakePersonalizedTSS{ticket: []byte("failed-recovery-ticket")})
+	if _, err := failedRecoverySession.Execute("raw-device", 21, requestPayload, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := failedRecoverySession.Execute("raw-device", 21, personalizedTestPayload("mount", reference), time.Now().Add(time.Minute)); err == nil {
+		t.Fatal("already-mounted recovery succeeded without a confirmed mounted image")
+	}
+	if failedRecoveryMounter.probed {
+		t.Fatal("already-mounted recovery probed services without a confirmed mounted image")
+	}
+
 	tssFailureMounter := &fakePersonalizedMounter{}
 	tssFailure := NewPersonalizedDeveloperSupportSession(store, func(string, time.Time) (PersonalizedMounter, error) {
 		return tssFailureMounter, nil
@@ -436,15 +546,22 @@ func TestPersonalizedSessionRequestTSSMountAndAlreadyMounted(t *testing.T) {
 
 type fakePersonalizedMounter struct {
 	mounted         bool
+	queryResults    []PersonalizedMountedImage
 	reusable        []byte
 	queriedManifest bool
 	uploaded        bool
 	probed          bool
 	closed          int
 	closeErr        error
+	mountErr        error
 }
 
 func (mounter *fakePersonalizedMounter) QueryMounted() (PersonalizedMountedImage, error) {
+	if len(mounter.queryResults) != 0 {
+		result := mounter.queryResults[0]
+		mounter.queryResults = mounter.queryResults[1:]
+		return result, nil
+	}
 	return PersonalizedMountedImage{Present: mounter.mounted}, nil
 }
 
@@ -463,6 +580,9 @@ func (mounter *fakePersonalizedMounter) Upload(*os.File, int64, []byte, time.Tim
 }
 
 func (mounter *fakePersonalizedMounter) Mount([]byte, []byte) error {
+	if mounter.mountErr != nil {
+		return mounter.mountErr
+	}
 	mounter.mounted = true
 	return nil
 }

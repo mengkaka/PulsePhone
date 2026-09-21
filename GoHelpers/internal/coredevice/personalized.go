@@ -1052,22 +1052,78 @@ func OpenCoreDevicePersonalizedMounter(rawUDID string, deadline time.Time) (Pers
 }
 
 func (mounter *CoreDevicePersonalizedMounter) QueryMounted() (PersonalizedMountedImage, error) {
-	response, err := mounter.sendReceive(map[string]any{"Command": "LookupImage", "ImageType": "Personalized"})
-	if err != nil {
-		return PersonalizedMountedImage{}, err
+	queries := []map[string]any{
+		{"Command": "LookupImage", "ImageType": "Personalized"},
+		{"Command": "LookupImage", "ImageType": "DeveloperDiskImage"},
+		{"Command": "LookupImage", "ImageType": "Developer"},
+		{"Command": "CopyDevices"},
 	}
-	present := true
-	if value, exists := response["ImagePresent"]; exists {
-		var ok bool
-		present, ok = value.(bool)
+	var lastErr error
+	knownProvider := false
+	for _, query := range queries {
+		response, err := mounter.sendReceive(query)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		present, known, parseErr := mountedImageResponse(query, response)
+		if parseErr != nil {
+			lastErr = parseErr
+			continue
+		}
+		if known && present {
+			return PersonalizedMountedImage{Present: true}, nil
+		}
+		if known {
+			knownProvider = true
+			continue
+		}
+		lastErr = personalizedError("mounter response")
+	}
+	if knownProvider {
+		return PersonalizedMountedImage{Present: false}, nil
+	}
+	if lastErr != nil {
+		return PersonalizedMountedImage{}, lastErr
+	}
+	return PersonalizedMountedImage{Present: false}, nil
+}
+
+func mountedImageResponse(query, response map[string]any) (present, known bool, err error) {
+	if query["Command"] == "CopyDevices" {
+		entries, ok := response["EntryList"].([]any)
 		if !ok {
-			return PersonalizedMountedImage{}, personalizedError("mounter response")
+			return false, false, personalizedError("mounter response")
+		}
+		for _, value := range entries {
+			entry, ok := value.(map[string]any)
+			if !ok {
+				return false, false, personalizedError("mounter response")
+			}
+			if mounted, ok := entry["IsMounted"].(bool); ok && mounted {
+				return true, true, nil
+			}
+		}
+		return false, true, nil
+	}
+	if value, exists := response["ImagePresent"]; exists {
+		present, ok := value.(bool)
+		if !ok {
+			return false, false, personalizedError("mounter response")
+		}
+		return present, true, nil
+	}
+	if signature, exists := response["ImageSignature"]; exists {
+		switch value := signature.(type) {
+		case []any:
+			return len(value) > 0, true, nil
+		case []byte:
+			return len(value) > 0, true, nil
+		default:
+			return false, false, personalizedError("mounter response")
 		}
 	}
-	if signature, ok := response["ImageSignature"].([]any); ok && len(signature) == 0 {
-		present = false
-	}
-	return PersonalizedMountedImage{Present: present}, nil
+	return false, false, nil
 }
 
 func (mounter *CoreDevicePersonalizedMounter) QueryReusableManifest(imageSHA384 []byte) ([]byte, error) {
@@ -1177,10 +1233,48 @@ func (mounter *CoreDevicePersonalizedMounter) Mount(ticket, trustCache []byte) e
 	response, err := mounter.sendReceive(map[string]any{
 		"Command": "MountImage", "ImageSignature": ticket, "ImageTrustCache": trustCache, "ImageType": "Personalized",
 	})
-	if err != nil || response["Status"] != "Complete" {
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "already mounted") {
+			return personalizedError("alreadyMounted")
+		}
+		return err
+	}
+	if response["Status"] != "Complete" {
+		if responseContainsAlreadyMounted(response) {
+			return personalizedError("alreadyMounted")
+		}
 		return personalizedError("MountImage")
 	}
 	return nil
+}
+
+func responseContainsAlreadyMounted(response map[string]any) bool {
+	var visit func(any) bool
+	visit = func(value any) bool {
+		switch typed := value.(type) {
+		case string:
+			return strings.Contains(strings.ToLower(typed), "already mounted")
+		case map[string]any:
+			for _, nested := range typed {
+				if visit(nested) {
+					return true
+				}
+			}
+		case []any:
+			for _, nested := range typed {
+				if visit(nested) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return visit(response)
+}
+
+func isAlreadyMountedError(err error) bool {
+	var personalized *PersonalizedError
+	return errors.As(err, &personalized) && personalized.Code == "alreadyMounted"
 }
 
 func (mounter *CoreDevicePersonalizedMounter) ProbeServices(serviceNames []string, deadline time.Time) error {
@@ -1376,6 +1470,27 @@ func (session *PersonalizedDeveloperSupportSession) Execute(rawUDID string, conn
 			err = mounter.Mount(manifest.Bytes, trustCache)
 		}
 		_ = asset.Close()
+		if isAlreadyMountedError(err) {
+			alreadyMountedErr := err
+			mounted, queryErr := mounter.QueryMounted()
+			if queryErr != nil {
+				return nil, queryErr
+			}
+			if mounted.Present {
+				if err := mounter.ProbeServices(reference.RequiredServices, deadline); err != nil {
+					return nil, personalizedError("developerSupportUnavailable")
+				}
+				result := session.mountedResult(validated, mounted)
+				result["manifestSource"] = "noneAlreadyMounted"
+				result["mountCommitted"] = true
+				result["mountDisposition"] = "alreadyMounted"
+				result["requiredServiceCount"] = int64(len(reference.RequiredServices))
+				result["servicesReady"] = true
+				result["tssRequested"] = manifest.Source == "appleTSS"
+				return result, nil
+			}
+			return nil, alreadyMountedErr
+		}
 		if err != nil {
 			return nil, err
 		}

@@ -3723,6 +3723,9 @@ public struct ProductionRuntimeOperationBackend: Sendable {
       case .bool(true)? = mountValue["mounted"],
       case .bool(true)? = mountValue["mountCommitted"]
     else { return .failed(code: "preparationFailed") }
+    let mountDisposition: PreparationMountDisposition =
+      mountValue["mountDisposition"]?.stringValue == "alreadyMounted"
+        ? .alreadyMounted : .mounted
     let result = try modernPreparationSuccess(
       assetDisposition: assetDisposition,
       capabilityIDs: capabilityIDs,
@@ -3730,7 +3733,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
       coordinator: coordinator,
       disposition: .ready,
       groupID: groupID,
-      mountDisposition: .mounted,
+      mountDisposition: mountDisposition,
       preparationAttemptID: preparationAttemptID,
       provenance: mountValue["provenance"]?.stringValue ?? "approved",
       actionID: actionID,
@@ -4268,6 +4271,9 @@ public struct ProductionRuntimeOperationBackend: Sendable {
         else {
             return .failed(code: "preparationFailed")
         }
+        let mountDisposition: PreparationMountDisposition =
+            mountValue["mountDisposition"]?.stringValue == "alreadyMounted"
+                ? .alreadyMounted : .mounted
         return try modernPreparationSuccess(
             assetDisposition: assetDisposition,
             capabilityIDs: capabilityIDs,
@@ -4275,7 +4281,7 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             coordinator: coordinator,
             disposition: .ready,
             groupID: groupID,
-            mountDisposition: .mounted,
+            mountDisposition: mountDisposition,
             preparationAttemptID: preparationAttemptID,
             provenance: mountValue["provenance"]?.stringValue ?? "approved",
             actionID: actionID,
