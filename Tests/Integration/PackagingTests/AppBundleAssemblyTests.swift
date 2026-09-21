@@ -62,7 +62,7 @@ final class AppBundleAssemblyTests: XCTestCase {
             )
         )
         XCTAssertEqual(value["schemaVersion"] as? Int, 1)
-        XCTAssertEqual(value["appVersion"] as? String, "0.2.1")
+        XCTAssertEqual(value["appVersion"] as? String, "0.2.2")
         XCTAssertEqual(value["buildID"] as? String, "1")
         XCTAssertEqual(value["deviceClass"] as? String, "iPhone")
         XCTAssertEqual(value["deviceOSMinimumInclusive"] as? String, "14.0.0")
