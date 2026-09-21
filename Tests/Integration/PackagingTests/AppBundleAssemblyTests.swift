@@ -203,20 +203,20 @@ final class AppBundleAssemblyTests: XCTestCase {
         XCTAssertFalse(source.contains("scan latest"))
     }
 
-    func testPortableAgentSkillUsesNormalizedIdentityAndGlobalCLIOnly() throws {
+    func testPortableAgentSkillUsesCurrentGlobalCLIAndDeviceSafetyGuidance() throws {
         let data = try file("skills/pulsephone/SKILL.md")
         let source = try XCTUnwrap(String(data: data, encoding: .utf8))
         for required in [
             "name: pulsephone",
             "globally installed `PulsePhone` CLI",
             "PulsePhone version --json",
-            "reinstall this skill from a complete\nPulsePhone.app with `skill install`",
             "PulsePhone devices --json",
+            "Use only an eligible USB iPhone.",
+            "Pass its canonical `--udid` to every subsequent device command.",
             "PulsePhone element snapshot --udid <UDID>",
             "center.normalized.x",
-            "does not install WebDriver or\nan XCTest Runner",
-            "PulsePhone tap --x <NORMALIZED_X> --y <NORMALIZED_Y>",
-            "`--force` only permits an\natomic replacement",
+            "PulsePhone tap --x 0.5 --y 0.5 --udid <UDID> --json",
+            "add `--force` only when replacing that existing output is intended.",
         ] {
             XCTAssertTrue(source.contains(required), required)
         }
