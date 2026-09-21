@@ -12,17 +12,61 @@ public enum DynamicDeveloperImageCatalogStoreError: Error, Equatable, Sendable {
 }
 
 public struct DynamicDeveloperImageCatalogStoreConfiguration: Equatable, Sendable {
+  private static let releaseCatalogURL = "https://raw.githubusercontent.com/mengkaka/DeveloperDiskImage/release/PulsePhone/developer-image-catalog.v1.json"
+  private static let releaseArchiveURLPrefix = "https://raw.githubusercontent.com/mengkaka/DeveloperDiskImage/release/PulsePhone/archives/"
+  private static let devCatalogURL = "https://raw.githubusercontent.com/mengkaka/DeveloperDiskImage/dev/PulsePhone/developer-image-catalog.v1.json"
+  private static let devArchiveURLPrefix = "https://raw.githubusercontent.com/mengkaka/DeveloperDiskImage/dev/PulsePhone/archives/"
+
   public static let release = Self(
-    catalogURL: "https://raw.githubusercontent.com/mengkaka/DeveloperDiskImage/release/PulsePhone/developer-image-catalog.v1.json",
-    archiveURLPrefix: "https://raw.githubusercontent.com/mengkaka/DeveloperDiskImage/release/PulsePhone/archives/"
+    catalogURL: releaseCatalogURL,
+    archiveURLPrefixes: [releaseArchiveURLPrefix],
+    catalogDirectoryName: "Catalog"
   )
 
-  public let archiveURLPrefix: String
+  public static let dev = Self(
+    catalogURL: devCatalogURL,
+    archiveURLPrefixes: [devArchiveURLPrefix, releaseArchiveURLPrefix],
+    catalogDirectoryName: "Catalog-dev"
+  )
+
+  public let archiveURLPrefixes: [String]
   public let catalogURL: String
+  private let catalogDirectoryNameValue: String
+
+  public var archiveURLPrefix: String {
+    archiveURLPrefixes.first ?? ""
+  }
 
   public init(catalogURL: String, archiveURLPrefix: String) {
+    self.init(
+      catalogURL: catalogURL,
+      archiveURLPrefixes: [archiveURLPrefix],
+      catalogDirectoryName: "Catalog"
+    )
+  }
+
+  public init(catalogURL: String, archiveURLPrefixes: [String]) {
+    self.init(
+      catalogURL: catalogURL,
+      archiveURLPrefixes: archiveURLPrefixes,
+      catalogDirectoryName: "Catalog"
+    )
+  }
+
+  private init(
+    catalogURL: String,
+    archiveURLPrefixes: [String],
+    catalogDirectoryName: String
+  ) {
     self.catalogURL = catalogURL
-    self.archiveURLPrefix = archiveURLPrefix
+    self.archiveURLPrefixes = archiveURLPrefixes
+    self.catalogDirectoryNameValue = catalogDirectoryName
+  }
+
+  var catalogDirectoryName: String { catalogDirectoryNameValue }
+
+  public static func selected(useDevCatalog: Bool) -> Self {
+    useDevCatalog ? .dev : .release
   }
 
   func validatesCatalogURL(_ url: URL) -> Bool {
@@ -37,7 +81,7 @@ public struct DynamicDeveloperImageCatalogStoreConfiguration: Equatable, Sendabl
   }
 
   func validatesArchiveURL(_ value: String) -> Bool {
-    guard value.hasPrefix(archiveURLPrefix),
+    guard let archiveURLPrefix = archiveURLPrefixes.first(where: value.hasPrefix),
       let url = URL(string: value), url.scheme == "https",
       url.host == "raw.githubusercontent.com", url.user == nil,
       url.password == nil, url.port == nil, url.query == nil, url.fragment == nil
@@ -406,7 +450,12 @@ public final class DynamicDeveloperImageCatalogStore: @unchecked Sendable {
     let metadata: DynamicDeveloperImageCatalogMetadataV1
   }
 
-  private var catalogPath: String { rootURL.path + "/Catalog" }
+  private var catalogPath: String {
+    rootURL.appendingPathComponent(
+      configuration.catalogDirectoryName,
+      isDirectory: true
+    ).path
+  }
   private var catalogFilePath: String {
     catalogPath + "/developer-image-catalog.v1.json"
   }

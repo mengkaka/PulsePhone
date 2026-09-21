@@ -84,6 +84,49 @@ final class ElementAnalyzerTests: XCTestCase {
         }
     }
 
+    func testDeveloperImageDevCatalogConfigurationAcceptsOnlyBooleanText() throws {
+        let key = PulsePhoneConfigurationKey.developerImageUseDevCatalog
+
+        XCTAssertEqual(
+            try PulsePhoneConfigurationRegistry.validate(key: key, rawValue: "TRUE"),
+            .boolean(true)
+        )
+        XCTAssertEqual(
+            try PulsePhoneConfigurationRegistry.validate(key: key, rawValue: "false"),
+            .boolean(false)
+        )
+
+        for invalid in ["", "1", "yes", " true "] {
+            XCTAssertThrowsError(
+                try PulsePhoneConfigurationRegistry.validate(key: key, rawValue: invalid)
+            ) { error in
+                XCTAssertEqual(
+                    error as? PulsePhoneConfigurationRegistryError,
+                    .invalidValue
+                )
+            }
+        }
+    }
+
+    func testDeveloperImageDevCatalogDefaultsToRelease() throws {
+        let empty = PulsePhoneConfigurationSnapshot()
+        XCTAssertFalse(
+            try PulsePhoneConfigurationRegistry.developerImageUseDevCatalog(in: empty)
+        )
+
+        let wrongType = PulsePhoneConfigurationSnapshot(values: [
+            PulsePhoneConfigurationKey.developerImageUseDevCatalog.rawValue: .string("true")
+        ])
+        XCTAssertThrowsError(
+            try PulsePhoneConfigurationRegistry.developerImageUseDevCatalog(in: wrongType)
+        ) { error in
+            XCTAssertEqual(
+                error as? PulsePhoneConfigurationRegistryError,
+                .invalidValue
+            )
+        }
+    }
+
     func testOmniProductionSessionDoesNotRetainProxyCookieOrCredentials() {
         let configuration = OmniParserAnalyzer.productionSessionConfiguration()
 

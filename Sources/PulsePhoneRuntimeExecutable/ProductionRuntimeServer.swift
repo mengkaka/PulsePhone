@@ -494,12 +494,15 @@ public struct ProductionRuntimeOperationBackend: Sendable {
     let developerImageStore = try DeveloperImageAssetStore(
       rootURL: developerImageRoot
     )
+    let dynamicCatalogConfiguration = try Self.dynamicDeveloperImageCatalogConfiguration()
     let dynamicDeveloperImageCatalogStore = try DynamicDeveloperImageCatalogStore(
-      rootURL: developerImageRoot
+      rootURL: developerImageRoot,
+      configuration: dynamicCatalogConfiguration
     )
     let dynamicDeveloperImageAssetCache = try DynamicDeveloperImageAssetCache(
-      rootURL: developerImageRoot
-        )
+      rootURL: developerImageRoot,
+      configuration: dynamicCatalogConfiguration
+    )
         let supervisorRegistry = ProductionHelperSupervisorRegistry(
             runtimeEpoch: runtimeEpoch
         )
@@ -835,6 +838,14 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             runtimeLock: runtimeLock,
             manifestStore: manifestStore
         )
+    }
+
+    private static func dynamicDeveloperImageCatalogConfiguration()
+        throws -> DynamicDeveloperImageCatalogStoreConfiguration {
+        let snapshot = try PulsePhoneConfigurationStore.bundled().load()
+        let useDevCatalog = try PulsePhoneConfigurationRegistry
+            .developerImageUseDevCatalog(in: snapshot)
+        return .selected(useDevCatalog: useDevCatalog)
     }
 
     func shutdown() {

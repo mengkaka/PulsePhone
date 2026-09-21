@@ -114,8 +114,19 @@ public struct PulsePhoneCLIProcess: Sendable {
         makeDeveloperImageDiagnostics: @escaping DeveloperImageDiagnosticsFactory = {
             let root = URL(fileURLWithPath: try POSIXHostPathSystem()
                 .makeHostPathLayout().developerImageStoreDirectory)
-            let catalogStore = try DynamicDeveloperImageCatalogStore(rootURL: root)
-            let assetCache = try DynamicDeveloperImageAssetCache(rootURL: root)
+            let snapshot = try PulsePhoneConfigurationStore.bundled().load()
+            let useDevCatalog = try PulsePhoneConfigurationRegistry
+                .developerImageUseDevCatalog(in: snapshot)
+            let configuration = DynamicDeveloperImageCatalogStoreConfiguration
+                .selected(useDevCatalog: useDevCatalog)
+            let catalogStore = try DynamicDeveloperImageCatalogStore(
+                rootURL: root,
+                configuration: configuration
+            )
+            let assetCache = try DynamicDeveloperImageAssetCache(
+                rootURL: root,
+                configuration: configuration
+            )
             return DynamicDeveloperImageDiagnostics(
                 catalogStore: catalogStore,
                 assetCache: assetCache

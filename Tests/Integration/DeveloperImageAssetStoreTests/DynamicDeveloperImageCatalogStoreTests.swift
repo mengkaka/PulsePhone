@@ -5,6 +5,22 @@ import PulsePhoneSharedDefinitions
 import XCTest
 
 final class DynamicDeveloperImageCatalogStoreTests: XCTestCase {
+  func testDevConfigurationAcceptsDevAndReleaseArchives() {
+    let devPrefix = "https://raw.githubusercontent.com/mengkaka/DeveloperDiskImage/dev/PulsePhone/archives/"
+    let releasePrefix = "https://raw.githubusercontent.com/mengkaka/DeveloperDiskImage/release/PulsePhone/archives/"
+    let configuration = DynamicDeveloperImageCatalogStoreConfiguration.dev
+
+    XCTAssertEqual(
+      configuration.catalogURL,
+      "https://raw.githubusercontent.com/mengkaka/DeveloperDiskImage/dev/PulsePhone/developer-image-catalog.v1.json"
+    )
+    XCTAssertTrue(configuration.validatesArchiveURL(devPrefix + "baseAssets/base.27-test.tar"))
+    XCTAssertTrue(configuration.validatesArchiveURL(releasePrefix + "baseAssets/base.26.5-test.tar"))
+    XCTAssertFalse(configuration.validatesArchiveURL(
+      "https://raw.githubusercontent.com/mengkaka/DeveloperDiskImage/other/PulsePhone/archives/baseAssets/unknown.tar"
+    ))
+  }
+
   func testReleaseArchiveDirectoryAdmissionUsesBaseAssetsAndDDIOnly() {
     let prefix = "https://raw.githubusercontent.com/mengkaka/DeveloperDiskImage/release/PulsePhone/archives/"
     let configuration = DynamicDeveloperImageCatalogStoreConfiguration.release
@@ -13,6 +29,56 @@ final class DynamicDeveloperImageCatalogStoreTests: XCTestCase {
     XCTAssertTrue(configuration.validatesArchiveURL(prefix + "DDI/16.3-test.tar"))
     XCTAssertFalse(configuration.validatesArchiveURL(prefix + "developerDiskImages/16.3-test.tar"))
     XCTAssertFalse(configuration.validatesArchiveURL(prefix + "DDI/nested/16.3-test.tar"))
+  }
+
+  func testDevAndReleaseCatalogsKeepIndependentOfflineFallbacks() throws {
+    let devConfiguration = DynamicDeveloperImageCatalogStoreConfiguration.dev
+    let releaseConfiguration = DynamicDeveloperImageCatalogStoreConfiguration.release
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let releaseData = try catalogData(revision: "2026-08-22.1")
+    let devData = try catalogData(revision: "2026-08-22.2")
+    let releaseStore = try DynamicDeveloperImageCatalogStore(
+      rootURL: root,
+      configuration: releaseConfiguration,
+      fetch: { _, _ in
+        DynamicDeveloperImageCatalogHTTPResponse(
+          data: releaseData,
+          etag: "\"release\"",
+          statusCode: 200
+        )
+      },
+      now: { Date(timeIntervalSince1970: 1_785_000_000) }
+    )
+    let devStore = try DynamicDeveloperImageCatalogStore(
+      rootURL: root,
+      configuration: devConfiguration,
+      fetch: { _, _ in
+        DynamicDeveloperImageCatalogHTTPResponse(
+          data: devData,
+          etag: "\"dev\"",
+          statusCode: 200
+        )
+      },
+      now: { Date(timeIntervalSince1970: 1_785_000_000) }
+    )
+
+    XCTAssertEqual(try releaseStore.snapshot().identity.revision, "2026-08-22.1")
+    XCTAssertEqual(try devStore.snapshot().identity.revision, "2026-08-22.2")
+    XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Catalog").path))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Catalog-dev").path))
+
+    let offlineReleaseStore = try DynamicDeveloperImageCatalogStore(
+      rootURL: root,
+      configuration: releaseConfiguration,
+      fetch: { _, _ in throw TestRemoteError.exhausted },
+      now: { Date(timeIntervalSince1970: 1_785_000_000) }
+    )
+    let fallback = try offlineReleaseStore.snapshot(forceRefresh: true)
+    XCTAssertTrue(fallback.staleCatalog)
+    XCTAssertEqual(fallback.identity.revision, "2026-08-22.1")
   }
 
   func testSelectedXcodeInventoryCommandHasBoundedTimeout() {

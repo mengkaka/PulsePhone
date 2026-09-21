@@ -59,6 +59,35 @@ final class PulsePhoneConfigCommandTests: XCTestCase {
         XCTAssertTrue(output.chunk.stdout[0].contains("\"code\":\"invalidArgument\""))
     }
 
+    func testDeveloperImageDevCatalogUsesStrictBooleanConfiguration() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "PulsePhoneCLI-DeveloperImage-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = PulsePhoneConfigurationStore(rootURL: root)
+        let adapter = CLIOutputAdapter(mode: .json)
+
+        let set = try XCTUnwrap(PulsePhoneConfigCommand.dispatch(
+            arguments: ["config", "set", "developerImage.useDevCatalog", "TrUe", "--json"],
+            adapter: adapter,
+            store: store
+        ))
+        XCTAssertEqual(set.exitCode, 0)
+        XCTAssertEqual(
+            try store.load().values["developerImage.useDevCatalog"],
+            .boolean(true)
+        )
+
+        let invalid = try XCTUnwrap(PulsePhoneConfigCommand.dispatch(
+            arguments: ["config", "set", "developerImage.useDevCatalog", "yes", "--json"],
+            adapter: adapter,
+            store: store
+        ))
+        XCTAssertEqual(invalid.exitCode, ErrorFamily.argument.exitCode)
+        XCTAssertTrue(invalid.chunk.stdout[0].contains("\"code\":\"invalidArgument\""))
+    }
+
     func testHelpConfigUsesConfigurationHelp() throws {
         let output = try XCTUnwrap(PulsePhoneConfigCommand.dispatch(
             arguments: ["help", "config"],

@@ -2,11 +2,14 @@ import PulsePhoneHostPaths
 
 public enum PulsePhoneConfigurationKey: String, CaseIterable, Sendable {
     case omniParserEndpoint = "omniparser.endpoint"
+    case developerImageUseDevCatalog = "developerImage.useDevCatalog"
 
     public var summary: String {
         switch self {
         case .omniParserEndpoint:
             "Optional OmniParser service URL. Applies to newly started device runtimes."
+        case .developerImageUseDevCatalog:
+            "Use the developer-image dev catalog for newly started device runtimes."
         }
     }
 }
@@ -36,6 +39,12 @@ public enum PulsePhoneConfigurationRegistry {
             } catch {
                 throw PulsePhoneConfigurationRegistryError.invalidValue
             }
+        case .developerImageUseDevCatalog:
+            switch rawValue.lowercased() {
+            case "true": return .boolean(true)
+            case "false": return .boolean(false)
+            default: throw PulsePhoneConfigurationRegistryError.invalidValue
+            }
         }
     }
 
@@ -49,5 +58,17 @@ public enum PulsePhoneConfigurationRegistry {
             throw PulsePhoneConfigurationRegistryError.invalidValue
         }
         return endpoint
+    }
+
+    public static func developerImageUseDevCatalog(
+        in snapshot: PulsePhoneConfigurationSnapshot
+    ) throws -> Bool {
+        guard let value = snapshot.values[
+            PulsePhoneConfigurationKey.developerImageUseDevCatalog.rawValue
+        ] else { return false }
+        guard case let .boolean(useDevCatalog) = value else {
+            throw PulsePhoneConfigurationRegistryError.invalidValue
+        }
+        return useDevCatalog
     }
 }
