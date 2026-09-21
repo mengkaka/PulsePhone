@@ -503,7 +503,10 @@ startingDeviceServices / probingServices / ready
 
 ### 18.3 Idle 与 generation retention
 
-Runtime idle字段为`lastCLIActivityAt`。validated CLI CommandIntent和成功注册的CLI`runtime.prepareCapabilities`刷新；health/status/progress/completion/GUI activity不刷新。
+Runtime idle grace由RuntimeLifecycleController按TRD 02 §12.5维护。validated CLI CommandIntent
+和成功注册的CLI `runtime.prepareCapabilities`在无blocker时刷新deadline；准备任务从admission到
+terminal和cleanup完成持续持有blocker，最后一个blocker释放后重开完整10分钟。
+health/status/progress/completion/GUI activity不单独刷新deadline。
 
 `assetAcquisition`和`preparingCapability`进入统一ShutdownInhibitorRegistry。ready generation保留到detach、fatal、incompatible retire或Runtime quiesce，不因最后一个observer/command terminal消失立即teardown。
 

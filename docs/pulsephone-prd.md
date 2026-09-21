@@ -752,6 +752,10 @@ video + control independently become available
 - 不取消已经 accepted 的 pending/running OneShot。
 - 不自动调用 `stopIfIdle`。
 
+Live关闭后不直接停止Runtime。Live拥有的Stream完成cancelAndClean并且Live owner detach后，
+若没有其他Runtime blocker，Runtime重新开始10分钟idle grace；grace到期时再次检查Live、
+Stream、job、preparation、trace、cleanup和fencing状态，全部为空才自动quiesce并退出。
+
 ### 9.2 视频与控制解耦
 
 AVFoundation 视频和 Runtime 控制是两条独立链路：
@@ -1354,13 +1358,15 @@ Ctrl-C                         -> exit 130
 自动退出条件：
 
 ```text
-没有 live
-+ 距最后一次有效 CLI activity >= 10 分钟
-+ 没有 OneShot / Stream / trace / asset acquisition / preparation / control mutation / cleanup blocker
+没有 Live / OneShot / Stream / trace / asset acquisition / preparation / control mutation / cleanup / fencing blocker
++ 连续无 blocker 的 idle grace 已满 10 分钟
 = Runtime 可以 quiesce 并退出
 ```
 
-有效 CLI CommandIntent 和成功注册的 CLI `device prepare` 刷新 activity 时间。health、runtime status、progress、命令完成和 live 内部 activity 不刷新。
+Runtime ready 且没有 blocker 时开始 10 分钟计时；增加 blocker 时取消计时，最后一个 blocker
+完成并释放后重新开始完整 10 分钟。有效 CLI CommandIntent 和成功注册的 CLI `device prepare`
+在无 blocker 时重启计时。health、runtime status、progress、命令完成通知和 Live 内部 activity
+不单独刷新；业务完成后的最后一个 blocker 释放按上述规则开启宽限期。
 
 ### 14.3 USB 断连与重连
 

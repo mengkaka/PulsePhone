@@ -560,14 +560,16 @@ RuntimeLifecycleController.attemptQuiesce(trigger)
 自动 idle 时间条件：
 
 ```text
-no live
-+ monotonic now - idleReferenceAt >= 10 minutes
-+ inhibitor registry empty
-
-idleReferenceAt = lastCLIActivityAt ?? runtimeReadyAt
+inhibitor registry empty
++ current idle grace deadline reached
 ```
 
-RuntimeWire 接收并通过基础校验的 CLI `CommandIntent`，或接收合法 `device.prepare` control request 时更新 `lastCLIActivityAt`。prepare progress、共享 attempt 的后台推进和 terminal 投影不重复刷新。以下事件不得刷新：
+RuntimeLifecycleController维护当前Runtime内存中的idle grace deadline。Runtime ready后、
+收到并通过基础校验的CLI `CommandIntent`、成功注册的CLI `runtime.prepareCapabilities`，以及
+最后一个ShutdownInhibitor释放时，Controller取消旧deadline并在无blocker时重新开启10分钟计时。
+blocker非空时不创建idle timer；timer到期后必须在同一Runtime状态边界再次检查blocker，只有
+blocker为空时才能进入automatic idle quiesce。prepare progress、共享attempt的后台推进和
+terminal投影不重复刷新。以下事件不得单独重启idle grace：
 
 ```text
 health / runtime status
@@ -577,7 +579,10 @@ Stream frame
 GUI action
 ```
 
-10 分钟条件已满足但仍有 inhibitor 时不丢弃工作；最后一个 token release 后立即重新尝试 idle quiesce。只要 live token 存在，即使 idle 时间已过，Runtime 也不能自动退出，并必须完成同一 UDID 的必要 reconnect capability rebuild。
+10分钟条件到达但仍有inhibitor时不丢弃工作；最后一个token release后重新开启完整10分钟idle
+grace。只要live token存在，即使旧deadline已过，Runtime也不能自动退出；Live detach完成并
+释放最后一个blocker后才重新开始idle grace。automatic idle、manual stop和fatal quiesce共用
+同一ShutdownInhibitorRegistry predicate与Runtime cleanup顺序。
 
 StopBlocker 只允许：
 
