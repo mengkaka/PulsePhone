@@ -1633,3 +1633,4 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 ### 2026-09-25 实施checkpoint
 
 - 分支`codex/fix-runtime-first-launch-store`采用既有AnchoredFileSystem从可信home验证祖先、创建缺失的Application Support与私有两级目录，Runtime和CLI诊断共用。新增fresh、重复调用、缺失Application Support及0755 fail-closed单测。`swift build --target PulsePhoneRuntimeExecutable`和测试源码语法检查通过；当前主机仅选中Command Line Tools，`swift test --filter AnchoredFileSystemTests`因工具链缺少XCTest而未运行到测试，CLI整模块另在未改动的`CLIHelpRenderer.swift:133`发生type-check超时。当前唯一下一动作：在完整Xcode环境运行focused与`make check`，再用fresh packaged候选验证空产品目录冷启动，按结果关闭或继续修复。
+- 源码、回归和合同checkpoint提交`0e57b63`；尚未作为经过完整Gate的候选合并到main。
