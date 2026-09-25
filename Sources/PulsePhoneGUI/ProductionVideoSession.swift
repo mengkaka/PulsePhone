@@ -1184,10 +1184,12 @@ final class ProductionBoundVideoSession: @unchecked Sendable {
         ) { binding in
             self.logPixelBufferFormatIfNeeded(sample.sampleBuffer)
             visualFingerprint = self.observeVisualChange(in: sample)
-            ProductionSampleBufferDisplay.enqueue(
-                sample.sampleBuffer,
-                on: self.displayLayer
-            )
+            DispatchQueue.main.async { [displayLayer = self.displayLayer] in
+                ProductionSampleBufferDisplay.enqueue(
+                    sample.sampleBuffer,
+                    on: displayLayer
+                )
+            }
             self.lock.withLock {
                 guard !self.stopped else { return }
                 self.latestFrame = (

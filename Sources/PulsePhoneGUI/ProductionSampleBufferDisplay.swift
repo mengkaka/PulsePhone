@@ -1,4 +1,4 @@
-@preconcurrency import AVFoundation
+import AVFoundation
 import CoreMedia
 import Foundation
 
@@ -55,6 +55,7 @@ enum ProductionSampleBufferDisplay {
         return true
     }
 
+    @MainActor
     static func enqueue(
         _ sampleBuffer: CMSampleBuffer,
         on displayLayer: AVSampleBufferDisplayLayer
