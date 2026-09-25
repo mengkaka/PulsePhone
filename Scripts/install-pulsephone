@@ -26,58 +26,48 @@ require_macos_arm64() {
     [ "$local_major" -ge 14 ] || fail "macOS 14 or later is required"
 }
 
-print_path_guidance() {
+configure_shell_path() {
     local launcher_path="$1"
     local launcher_directory="${launcher_path%/*}"
     local shell_name="${SHELL:-}"
     local path_line='export PATH="$HOME/.local/bin:$PATH"'
     local profile
-    case ":${PATH:-}:" in
-        *":${launcher_directory}:"*) return ;;
-    esac
 
-    /usr/bin/printf '\nPulsePhone is installed, but %s is not in PATH.\n' "$launcher_directory"
     if [ "$launcher_path" != "${HOME:-}/.local/bin/PulsePhone" ]; then
-        /usr/bin/printf 'Your shell HOME differs from the install location. Use %s directly; configure PATH for your login home manually.\n' "$launcher_path"
+        /usr/bin/printf 'Shell HOME differs from the install location. Use %s directly; configure PATH manually.\n' "$launcher_path"
         return
     fi
 
     case "${shell_name##*/}" in
         zsh)
             profile="${ZDOTDIR:-$HOME}/.zshrc"
-            if ! profile_is_safe "$profile"; then
-                /usr/bin/printf 'Cannot safely update %s; use %s directly and edit your shell configuration manually.\n' "$profile" "$launcher_path"
+            if ! profile_is_safe "$profile" || ! ensure_profile_path "$profile" "$path_line"; then
+                /usr/bin/printf 'Cannot safely update %s; use %s directly and configure PATH manually.\n' "$profile" "$launcher_path"
                 return
-            fi
-            /usr/bin/printf 'Copy and run this command to enable PulsePhone now and in future terminals:\n\n'
-            if [ -f "$profile" ] && /usr/bin/grep -Fqx "$path_line" "$profile"; then
-                /usr/bin/printf '%s\n' "$path_line"
-            else
-                /bin/cat <<'ZSH_GUIDANCE'
-/usr/bin/grep -Fqx 'export PATH="$HOME/.local/bin:$PATH"' "${ZDOTDIR:-$HOME}/.zshrc" 2>/dev/null || (umask 077; /usr/bin/printf '\n%s\n' 'export PATH="$HOME/.local/bin:$PATH"' >> "${ZDOTDIR:-$HOME}/.zshrc"); export PATH="$HOME/.local/bin:$PATH"
-ZSH_GUIDANCE
             fi
             ;;
         bash)
             for profile in "$HOME/.bash_profile" "$HOME/.bashrc"; do
                 if ! profile_is_safe "$profile"; then
-                    /usr/bin/printf 'Cannot safely update %s; use %s directly and edit your shell configuration manually.\n' "$profile" "$launcher_path"
+                    /usr/bin/printf 'Cannot safely update %s; use %s directly and configure PATH manually.\n' "$profile" "$launcher_path"
                     return
                 fi
             done
-            /usr/bin/printf 'Copy and run this command to enable PulsePhone now and in future terminals:\n\n'
-            if [ -f "$HOME/.bash_profile" ] && /usr/bin/grep -Fqx "$path_line" "$HOME/.bash_profile" &&
-                [ -f "$HOME/.bashrc" ] && /usr/bin/grep -Fqx "$path_line" "$HOME/.bashrc"; then
-                /usr/bin/printf '%s\n' "$path_line"
-            else
-                /bin/cat <<'BASH_GUIDANCE'
-for _p in "$HOME/.bash_profile" "$HOME/.bashrc"; do /usr/bin/grep -Fqx 'export PATH="$HOME/.local/bin:$PATH"' "$_p" 2>/dev/null || (umask 077; /usr/bin/printf '\n%s\n' 'export PATH="$HOME/.local/bin:$PATH"' >> "$_p"); done; unset _p; export PATH="$HOME/.local/bin:$PATH"
-BASH_GUIDANCE
-            fi
+            for profile in "$HOME/.bash_profile" "$HOME/.bashrc"; do
+                if ! ensure_profile_path "$profile" "$path_line"; then
+                    /usr/bin/printf 'Cannot safely update %s; use %s directly and configure PATH manually.\n' "$profile" "$launcher_path"
+                    return
+                fi
+            done
             ;;
         *)
             /usr/bin/printf 'Shell %s is not recognized. Run %s directly and configure PATH in your shell settings.\n' "${SHELL:-unknown}" "$launcher_path"
-            ;;
+            return ;;
+    esac
+
+    case ":${PATH:-}:" in
+        *":${launcher_directory}:"*) /usr/bin/printf 'PulsePhone is configured for future terminals.\n' ;;
+        *) /usr/bin/printf 'PulsePhone is configured for future terminals. To use it in this terminal, run:\n\n%s\n' "$path_line" ;;
     esac
 }
 
@@ -85,6 +75,10 @@ profile_is_safe() {
     local profile="$1"
     local parent="${profile%/*}"
     local uid
+    case "$profile" in
+        /*) ;;
+        *) return 1 ;;
+    esac
     uid="$(/usr/bin/id -u)"
     [ -d "$parent" ] && [ ! -L "$parent" ] && [ -w "$parent" ] &&
         [ "$(/usr/bin/stat -f %u "$parent")" = "$uid" ] || return 1
@@ -92,6 +86,16 @@ profile_is_safe() {
         [ ! -L "$profile" ] && [ -f "$profile" ] && [ -r "$profile" ] && [ -w "$profile" ] &&
             [ "$(/usr/bin/stat -f %u "$profile")" = "$uid" ] || return 1
     fi
+    return 0
+}
+
+ensure_profile_path() {
+    local profile="$1"
+    local path_line="$2"
+    if [ -f "$profile" ] && /usr/bin/grep -Fqx "$path_line" "$profile"; then
+        return 0
+    fi
+    profile_is_safe "$profile" && (umask 077; /usr/bin/printf '\n%s\n' "$path_line" >> "$profile")
 }
 
 cleanup() {
@@ -145,4 +149,4 @@ install_result="$("${application_path}/Contents/MacOS/PulsePhone" self install -
 launcher_path="$(/usr/bin/plutil -extract result.launcherPath raw -o - - <<< "$install_result")"
 installed_app_path="$(/usr/bin/plutil -extract result.applicationPath raw -o - - <<< "$install_result")"
 /usr/bin/printf 'PulsePhone ready at %s\n' "$installed_app_path"
-print_path_guidance "$launcher_path"
+configure_shell_path "$launcher_path"
