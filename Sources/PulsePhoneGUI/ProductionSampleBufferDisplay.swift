@@ -55,6 +55,7 @@ enum ProductionSampleBufferDisplay {
         return true
     }
 
+    @MainActor
     static func enqueue(
         _ sampleBuffer: CMSampleBuffer,
         on displayLayer: AVSampleBufferDisplayLayer

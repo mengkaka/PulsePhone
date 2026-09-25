@@ -127,7 +127,7 @@ public enum CommandCompatibility {
     guard let facts else {
       return .unknown(reason: "deviceFactsUnavailable")
     }
-    guard facts.deviceClass == "iPhone" else {
+    guard facts.deviceClass == "iPhone" || facts.deviceClass == "iPad" else {
       return .incompatible(reason: "unsupportedDeviceClass")
     }
     if let minimum = uint64(rule.parameters["minimumOSMajor"]), facts.osMajor < minimum {

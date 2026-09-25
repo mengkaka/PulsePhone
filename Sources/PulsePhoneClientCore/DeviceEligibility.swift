@@ -2,7 +2,7 @@ public enum DeviceEligibility: Sendable {
     public static func isDefaultEligible(
         _ device: USBDiscoveredDevice
     ) -> Bool {
-        device.facts.deviceClass == "iPhone"
+        device.facts.deviceClass == "iPhone" || device.facts.deviceClass == "iPad"
     }
 
     public static func defaultEligibleDevices(

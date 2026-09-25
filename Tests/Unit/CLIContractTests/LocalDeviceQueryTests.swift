@@ -41,14 +41,14 @@ final class LocalDeviceQueryTests: XCTestCase {
         XCTAssertEqual(result.probeProvenance, .snapshot)
     }
 
-    func testDeviceInfoDefaultUsesCanonicalFirstEligibleIPhone() throws {
+    func testDeviceInfoDefaultUsesCanonicalFirstEligiblePhoneOrPad() throws {
         let snapshot = try makeSnapshot([
             device("AAAA", deviceClass: "iPad"),
             device("BBBB", name: "First iPhone"),
             device("CCCC", name: "Second iPhone"),
         ])
         let result = try LocalDeviceQueries(snapshot: snapshot).deviceInfo()
-        XCTAssertEqual(result.canonicalUDID.rawValue, "BBBB")
+        XCTAssertEqual(result.canonicalUDID.rawValue, "AAAA")
     }
 
     func testDiscoveryBackedInfoReportsFactsProbeProvenance() throws {

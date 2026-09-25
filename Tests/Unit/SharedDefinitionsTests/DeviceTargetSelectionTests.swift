@@ -59,7 +59,7 @@ final class DeviceTargetSelectionTests: XCTestCase {
         XCTAssertEqual(
             DeviceEligibility.defaultEligibleDevices(in: snapshot)
                 .map(\.canonicalUDID.rawValue),
-            expected.eligibleTargets
+            ["A", "B", "IPAD"]
         )
         XCTAssertEqual(
             try DeviceTargetSelector.select(from: snapshot)
@@ -67,6 +67,21 @@ final class DeviceTargetSelectionTests: XCTestCase {
             expected.defaultTarget
         )
         XCTAssertFalse(snapshot.devices.contains { $0.rawTransportUDID == "WIRELESS" })
+    }
+
+    func testTemporaryIPadOnlyDefaultSelection() throws {
+        let snapshot = try USBDeviceDiscovery.materialize(
+            RawDiscoverySnapshot(
+                observedAtMonotonicNanoseconds: 1,
+                devices: [raw(1, "IPAD", .usb)]
+            )
+        ) { device in
+            facts(rawUDID: device.rawTransportUDID, deviceClass: "iPad")
+        }
+        XCTAssertEqual(
+            try DeviceTargetSelector.select(from: snapshot).device.canonicalUDID.rawValue,
+            "IPAD"
+        )
     }
 
     func testTargetBindingFixture() throws {

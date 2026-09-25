@@ -22,6 +22,28 @@ private struct AvailabilityFixture: Decodable {
 }
 
 final class AvailabilityTests: XCTestCase {
+  func testTemporaryIPadCommandCompatibility() {
+    let rule = CompatibilityRuleDescriptor(
+      parameters: ["deviceRequired": .bool(true), "minimumOSMajor": .uint64(14)],
+      ruleID: "temporary.ipad.validation",
+      ruleVersion: 1
+    )
+    XCTAssertEqual(
+      CommandCompatibility.evaluate(
+        rule: rule,
+        facts: DeviceFactsSnapshot(deviceClass: "iPad", osMajor: 26, transportIDs: [])
+      ),
+      .compatible
+    )
+    XCTAssertEqual(
+      CommandCompatibility.evaluate(
+        rule: rule,
+        facts: DeviceFactsSnapshot(deviceClass: "iPod", osMajor: 26, transportIDs: [])
+      ),
+      .incompatible(reason: "unsupportedDeviceClass")
+    )
+  }
+
   func testCatalogCompatibleAndEffectiveLayers() throws {
     let catalog = try loadExpandedCatalog()
     let planner = CommandPlanner(catalog: catalog)
