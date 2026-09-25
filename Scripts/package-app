@@ -365,6 +365,9 @@ def normalized_development_signing_identity(value: str | None) -> str:
 
 
 def development_signing_identity(argument_value: str | None) -> str:
+    if os.environ.get("PULSEPHONE_TEMP_IPAD_ADHOC_SIGN") == "1":
+        require(argument_value is None, "temporary ad-hoc signing cannot override an explicit identity")
+        return "-"
     if argument_value is not None:
         return normalized_development_signing_identity(argument_value)
     environment_value = os.environ.get("PULSEPHONE_DEVELOPMENT_SIGNING_IDENTITY")
