@@ -416,7 +416,8 @@ def swift_build_arguments(
     arguments = [
         "/usr/bin/xcrun", "swift", "build", "-c", "release",
         "--scratch-path", str(scratch), "--product", product, "--jobs", "1",
-        "-Xswiftc", "-no-whole-module-optimization",
+        *([] if os.environ.get("PULSEPHONE_TEMP_IPAD_USE_WMO") == "1"
+          else ["-Xswiftc", "-no-whole-module-optimization"]),
         "-Xswiftc", "-num-threads", "-Xswiftc", "1",
         "-debug-info-format", "none",
     ]
