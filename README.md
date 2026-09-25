@@ -25,6 +25,8 @@ curl -fsSL https://raw.githubusercontent.com/mengkaka/PulsePhone/main/Scripts/in
 
 The installer downloads `PulsePhone-macos-arm64.zip` and its `.sha256` file from the latest GitHub Release, verifies the archive, bundle ID, signing team, and Gatekeeper assessment, runs `PulsePhone self install`, then removes its temporary download. It installs to `~/Applications/PulsePhone.app` and provides `~/.local/bin/PulsePhone`; do not run it with `sudo`.
 
+If `~/.local/bin` is not on the current `PATH`, the installer prints shell-specific commands to copy and run. Installation does not change shell configuration automatically; the printed commands update the user's shell profile only when the user runs them.
+
 For inspection before execution, download the script and read it locally before passing it to `/bin/bash`.
 
 ### Agent Skill

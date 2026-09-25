@@ -26,6 +26,69 @@ require_macos_arm64() {
     [ "$local_major" -ge 14 ] || fail "macOS 14 or later is required"
 }
 
+print_path_guidance() {
+    local launcher_path="$1"
+    local launcher_directory="${launcher_path%/*}"
+    local shell_name="${SHELL:-}"
+    case ":${PATH:-}:" in
+        *":${launcher_directory}:"*) return ;;
+    esac
+
+    /usr/bin/printf '\nPulsePhone is installed, but %s is not in PATH.\n' "$launcher_directory"
+    if [ "$launcher_path" != "${HOME:-}/.local/bin/PulsePhone" ]; then
+        /usr/bin/printf 'Your shell HOME differs from the install location. Use %s directly; configure PATH for your login home manually.\n' "$launcher_path"
+        return
+    fi
+
+    case "${shell_name##*/}" in
+        zsh)
+            /usr/bin/printf 'Copy and run the following commands in your terminal to enable PulsePhone now and in future terminals:\n\n'
+            /bin/cat <<'ZSH_GUIDANCE'
+_pulsephone_profile="${ZDOTDIR:-$HOME}/.zshrc"
+_pulsephone_line='export PATH="$HOME/.local/bin:$PATH"'
+if [ -L "$_pulsephone_profile" ] || { [ -e "$_pulsephone_profile" ] && { [ ! -f "$_pulsephone_profile" ] || [ "$(/usr/bin/stat -f %u "$_pulsephone_profile")" != "$(/usr/bin/id -u)" ]; }; }; then
+  printf 'Cannot safely update %s; edit your shell configuration manually.\n' "$_pulsephone_profile" >&2
+else
+  if [ ! -e "$_pulsephone_profile" ]; then (umask 077; : > "$_pulsephone_profile"); fi
+  if ! /usr/bin/grep -Fqx "$_pulsephone_line" "$_pulsephone_profile"; then
+    /usr/bin/printf '\n%s\n' "$_pulsephone_line" >> "$_pulsephone_profile"
+  fi
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
+  command -v PulsePhone
+fi
+unset _pulsephone_profile _pulsephone_line
+ZSH_GUIDANCE
+            ;;
+        bash)
+            /usr/bin/printf 'Copy and run the following commands in your terminal to enable PulsePhone now and in future terminals:\n\n'
+            /bin/cat <<'BASH_GUIDANCE'
+_pulsephone_line='export PATH="$HOME/.local/bin:$PATH"'
+_pulsephone_safe=1
+for _pulsephone_profile in "$HOME/.bash_profile" "$HOME/.bashrc"; do
+  if [ -L "$_pulsephone_profile" ] || { [ -e "$_pulsephone_profile" ] && { [ ! -f "$_pulsephone_profile" ] || [ "$(/usr/bin/stat -f %u "$_pulsephone_profile")" != "$(/usr/bin/id -u)" ]; }; }; then
+    printf 'Cannot safely update %s; edit your shell configuration manually.\n' "$_pulsephone_profile" >&2
+    _pulsephone_safe=0
+  fi
+done
+if [ "$_pulsephone_safe" -eq 1 ]; then
+  for _pulsephone_profile in "$HOME/.bash_profile" "$HOME/.bashrc"; do
+    if [ ! -e "$_pulsephone_profile" ]; then (umask 077; : > "$_pulsephone_profile"); fi
+    if ! /usr/bin/grep -Fqx "$_pulsephone_line" "$_pulsephone_profile"; then
+      /usr/bin/printf '\n%s\n' "$_pulsephone_line" >> "$_pulsephone_profile"
+    fi
+  done
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
+  command -v PulsePhone
+fi
+unset _pulsephone_profile _pulsephone_line _pulsephone_safe
+BASH_GUIDANCE
+            ;;
+        *)
+            /usr/bin/printf 'Shell %s is not recognized. Run %s directly and configure PATH in your shell settings.\n' "${SHELL:-unknown}" "$launcher_path"
+            ;;
+    esac
+}
+
 cleanup() {
     status="$?"
     trap - EXIT HUP INT TERM
@@ -73,4 +136,8 @@ actual_team_identifier="$(/usr/bin/codesign -dv --verbose=4 "$application_path" 
 [ "$actual_team_identifier" = "$team_identifier" ] || fail "release signing team mismatch"
 /usr/sbin/spctl --assess --type execute --verbose=4 "$application_path"
 
-"${application_path}/Contents/MacOS/PulsePhone" self install
+install_result="$("${application_path}/Contents/MacOS/PulsePhone" self install --json)"
+launcher_path="$(/usr/bin/plutil -extract result.launcherPath raw -o - - <<< "$install_result")"
+installed_app_path="$(/usr/bin/plutil -extract result.applicationPath raw -o - - <<< "$install_result")"
+/usr/bin/printf 'PulsePhone ready at %s\n' "$installed_app_path"
+print_path_guidance "$launcher_path"
