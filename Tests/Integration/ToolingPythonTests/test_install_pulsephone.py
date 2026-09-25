@@ -13,12 +13,17 @@ SCRIPT = ROOT / "Scripts" / "install-pulsephone"
 
 class InstallPulsePhoneScriptTests(unittest.TestCase):
     @staticmethod
-    def path_guidance(home: Path, shell: str, path: str = "/usr/bin:/bin") -> str:
+    def path_guidance(
+        home: Path, shell: str, path: str = "/usr/bin:/bin", zdotdir: Path | None = None
+    ) -> str:
         script = SCRIPT.read_text(encoding="utf-8")
         beginning = script.index("print_path_guidance() {")
         ending = script.index("\n}\n\ncleanup()", beginning) + 2
         environment = os.environ.copy()
         environment.update(HOME=str(home), SHELL=shell, PATH=path)
+        environment.pop("ZDOTDIR", None)
+        if zdotdir is not None:
+            environment["ZDOTDIR"] = str(zdotdir)
         result = subprocess.run(
             [
                 "/bin/bash",
@@ -88,15 +93,24 @@ class InstallPulsePhoneScriptTests(unittest.TestCase):
             launcher.symlink_to("/usr/bin/true")
             zdotdir = home / "zsh-settings"
             zdotdir.mkdir()
-            guidance = self.path_guidance(home, "/bin/zsh")
+            guidance = self.path_guidance(home, "/bin/zsh", zdotdir=zdotdir)
             self.assertIn(".zshrc", guidance)
             snippet = guidance.split("future terminals:\n\n", 1)[1]
+            self.assertEqual(len(snippet.splitlines()), 1)
+            self.assertFalse((zdotdir / ".zshrc").exists())
             for _ in range(2):
-                result = self.run_guidance(snippet, home, "/bin/zsh", zdotdir)
+                result = self.run_guidance(
+                    snippet + "; command -v PulsePhone", home, "/bin/zsh", zdotdir
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(str(launcher), result.stdout)
             profile = (zdotdir / ".zshrc").read_text(encoding="utf-8")
             self.assertEqual(profile.count('export PATH="$HOME/.local/bin:$PATH"'), 1)
+            existing = self.path_guidance(home, "/bin/zsh", zdotdir=zdotdir)
+            self.assertEqual(
+                existing.split("future terminals:\n\n", 1)[1],
+                'export PATH="$HOME/.local/bin:$PATH"\n',
+            )
 
     def test_bash_guidance_covers_login_and_interactive_shells(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -107,12 +121,17 @@ class InstallPulsePhoneScriptTests(unittest.TestCase):
             snippet = self.path_guidance(home, "/bin/bash").split(
                 "future terminals:\n\n", 1
             )[1]
+            self.assertEqual(len(snippet.splitlines()), 1)
             for _ in range(2):
                 result = self.run_guidance(snippet, home, "/bin/bash")
                 self.assertEqual(result.returncode, 0, result.stderr)
             for filename in [".bash_profile", ".bashrc"]:
                 profile = (home / filename).read_text(encoding="utf-8")
                 self.assertEqual(profile.count('export PATH="$HOME/.local/bin:$PATH"'), 1)
+            self.assertEqual(
+                self.path_guidance(home, "/bin/bash").split("future terminals:\n\n", 1)[1],
+                'export PATH="$HOME/.local/bin:$PATH"\n',
+            )
 
     def test_guidance_does_not_write_through_profile_symlink(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -120,12 +139,46 @@ class InstallPulsePhoneScriptTests(unittest.TestCase):
             external = home / "existing"
             external.write_text("unchanged\n", encoding="utf-8")
             (home / ".zshrc").symlink_to(external)
-            snippet = self.path_guidance(home, "/bin/zsh").split(
+            guidance = self.path_guidance(home, "/bin/zsh")
+            self.assertIn("Cannot safely update", guidance)
+            self.assertNotIn("future terminals:", guidance)
+            self.assertEqual(external.read_text(encoding="utf-8"), "unchanged\n")
+
+    def test_unsafe_bash_profile_emits_no_partial_command(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            (home / ".bash_profile").write_text("existing\n", encoding="utf-8")
+            (home / ".bashrc").mkdir()
+            guidance = self.path_guidance(home, "/bin/bash")
+            self.assertIn("Cannot safely update", guidance)
+            self.assertNotIn("future terminals:", guidance)
+            self.assertEqual((home / ".bash_profile").read_text(), "existing\n")
+
+    def test_partially_configured_bash_still_updates_missing_profile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            line = 'export PATH="$HOME/.local/bin:$PATH"'
+            (home / ".bash_profile").write_text(line + "\n", encoding="utf-8")
+            snippet = self.path_guidance(home, "/bin/bash").split(
                 "future terminals:\n\n", 1
             )[1]
-            result = self.run_guidance(snippet, home, "/bin/zsh")
-            self.assertIn("Cannot safely update", result.stderr)
-            self.assertEqual(external.read_text(encoding="utf-8"), "unchanged\n")
+            self.assertEqual(len(snippet.splitlines()), 1)
+            result = self.run_guidance(snippet, home, "/bin/bash")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((home / ".bash_profile").read_text(), line + "\n")
+            self.assertEqual((home / ".bashrc").read_text().count(line), 1)
+
+    def test_unsafe_zdotdir_emits_no_command(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            target = home / "settings"
+            target.mkdir()
+            symlink = home / "linked-settings"
+            symlink.symlink_to(target, target_is_directory=True)
+            guidance = self.path_guidance(home, "/bin/zsh", zdotdir=symlink)
+            self.assertIn("Cannot safely update", guidance)
+            self.assertNotIn("future terminals:", guidance)
+            self.assertEqual(list(target.iterdir()), [])
 
     def test_no_guidance_when_path_is_present_and_unknown_shell_stays_read_only(self):
         with tempfile.TemporaryDirectory() as temporary:
