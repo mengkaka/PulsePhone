@@ -71,6 +71,102 @@ final class AnchoredFileSystemTests: XCTestCase {
         )
     }
 
+    func testDeveloperImageStoreCreatesPrivateDirectoriesOnFreshUserData() throws {
+        let fixture = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(atPath: fixture) }
+        let fileSystem = AnchoredFileSystem()
+        let support = try fileSystem.openDirectory(
+            atPath: fixture,
+            expecting: HostNodeExpectation(owner: geteuid(), kind: .directory, mode: 0o700)
+        )
+
+        let first = try POSIXHostPathSystem.ensureDeveloperImageStoreAnchor(
+            in: support,
+            fileSystem: fileSystem,
+            owner: geteuid()
+        )
+        XCTAssertEqual(permissions(at: fixture + "/PulsePhone"), 0o700)
+        XCTAssertEqual(permissions(at: first.logicalPath), 0o700)
+        let second = try POSIXHostPathSystem.ensureDeveloperImageStoreAnchor(
+            in: support,
+            fileSystem: fileSystem,
+            owner: geteuid()
+        )
+        XCTAssertEqual(first.identity, second.identity)
+    }
+
+    func testDeveloperImageStoreCreatesMissingApplicationSupport() throws {
+        let fixture = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(atPath: fixture) }
+        let fileSystem = AnchoredFileSystem()
+        let home = try fileSystem.openDirectory(
+            atPath: fixture,
+            expecting: HostNodeExpectation(owner: geteuid(), kind: .directory, mode: 0o700)
+        )
+        XCTAssertEqual(mkdir(fixture + "/Library", 0o700), 0)
+
+        let store = try POSIXHostPathSystem.ensureDeveloperImageStoreAnchor(
+            inHome: home,
+            fileSystem: fileSystem,
+            system: POSIXHostPathSystem()
+        )
+        XCTAssertEqual(permissions(at: fixture + "/Library/Application Support"), 0o700)
+        XCTAssertEqual(permissions(at: fixture + "/Library/Application Support/PulsePhone"), 0o700)
+        XCTAssertEqual(permissions(at: store.logicalPath), 0o700)
+    }
+
+    func testDeveloperImageStoreRejectsExistingWorldReadableDirectory() throws {
+        let fixture = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(atPath: fixture) }
+        let fileSystem = AnchoredFileSystem()
+        let support = try fileSystem.openDirectory(
+            atPath: fixture,
+            expecting: HostNodeExpectation(owner: geteuid(), kind: .directory, mode: 0o700)
+        )
+        XCTAssertEqual(mkdir(fixture + "/PulsePhone", 0o755), 0)
+        XCTAssertEqual(chmod(fixture + "/PulsePhone", 0o755), 0)
+        XCTAssertThrowsError(
+            try POSIXHostPathSystem.ensureDeveloperImageStoreAnchor(
+                in: support,
+                fileSystem: fileSystem,
+                owner: geteuid()
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AnchoredFileSystemError,
+                .unsafeNode(reason: .wrongMode(expected: 0o700, actual: 0o755))
+            )
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture + "/PulsePhone/DeveloperImages"))
+    }
+
+    func testDeveloperImageStoreDoesNotRepairWorldReadableStore() throws {
+        let fixture = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(atPath: fixture) }
+        let fileSystem = AnchoredFileSystem()
+        let support = try fileSystem.openDirectory(
+            atPath: fixture,
+            expecting: HostNodeExpectation(owner: geteuid(), kind: .directory, mode: 0o700)
+        )
+        XCTAssertEqual(mkdir(fixture + "/PulsePhone", 0o700), 0)
+        XCTAssertEqual(mkdir(fixture + "/PulsePhone/DeveloperImages", 0o755), 0)
+        XCTAssertEqual(chmod(fixture + "/PulsePhone/DeveloperImages", 0o755), 0)
+
+        XCTAssertThrowsError(
+            try POSIXHostPathSystem.ensureDeveloperImageStoreAnchor(
+                in: support,
+                fileSystem: fileSystem,
+                owner: geteuid()
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AnchoredFileSystemError,
+                .unsafeNode(reason: .wrongMode(expected: 0o700, actual: 0o755))
+            )
+        }
+        XCTAssertEqual(permissions(at: fixture + "/PulsePhone/DeveloperImages"), 0o755)
+    }
+
     func testForeignModeTypeSymlinkAndIdentityFailWithoutRepair() throws {
         let fixtureCase = try fixture("T-016/foreign-node-l2")
         XCTAssertEqual(fixtureCase.manifest.caseClass, "negative")

@@ -112,8 +112,8 @@ public struct PulsePhoneCLIProcess: Sendable {
         },
         makeQueries: @escaping @Sendable () throws -> LocalDeviceQueries,
         makeDeveloperImageDiagnostics: @escaping DeveloperImageDiagnosticsFactory = {
-            let root = URL(fileURLWithPath: try POSIXHostPathSystem()
-                .makeHostPathLayout().developerImageStoreDirectory)
+            let anchor = try POSIXHostPathSystem().openDeveloperImageStoreAnchor()
+            let root = URL(fileURLWithPath: anchor.logicalPath)
             let snapshot = try PulsePhoneConfigurationStore.bundled().load()
             let useDevCatalog = try PulsePhoneConfigurationRegistry
                 .developerImageUseDevCatalog(in: snapshot)

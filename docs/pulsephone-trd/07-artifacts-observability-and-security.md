@@ -176,6 +176,8 @@ GUIHost对connected-target duplicate claim和人工reassignment使用进程级�
 
 `DeveloperImages/`设置excluded-from-backup。asset的下载、原子publish与prune使用per-asset exclusive`flock`；Runtime/Helper从完整校验到mount文件全部打开期间持shared`flock`。host-wide`asset-store.lock`把approved remote acquisition并发限制为1，并统一串行化catalog publish、capacity calculation、prune、asset publish和cache-index update/rebuild；lock order固定为`asset-store -> asset`。`cache-index.v1.json`、progress、partial metadata、PID和socket只用于可重建观察，不能替代catalog、integrity、capacity或lock ownership。
 
+Runtime和本地Developer Image诊断入口在初始化store之前，从可信login home的anchored directory验证`Library`，缺失时创建`Application Support`，并逐级验证其owner/type；创建或验证`PulsePhone/DeveloperImages`为当前用户拥有的`0700`目录。首次使用不能要求用户预建目录；产品私有目录既有错误权限、symlink或foreign node必须fail closed，不自动chmod、不跟随、不递归清理。
+
 ### 30.3 Storage lifecycle
 
 ```text

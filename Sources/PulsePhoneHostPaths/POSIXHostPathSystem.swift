@@ -269,6 +269,61 @@ public struct POSIXHostPathSystem: Sendable {
         )
     }
 
+    public func openDeveloperImageStoreAnchor() throws -> AnchoredDirectory {
+        let fileSystem = AnchoredFileSystem(system: self)
+        let home = try openHomeAnchor(fileSystem: fileSystem)
+        return try Self.ensureDeveloperImageStoreAnchor(
+            inHome: home,
+            fileSystem: fileSystem,
+            system: self
+        )
+    }
+
+    static func ensureDeveloperImageStoreAnchor(
+        inHome home: AnchoredDirectory,
+        fileSystem: AnchoredFileSystem,
+        system: POSIXHostPathSystem
+    ) throws -> AnchoredDirectory {
+        let owner = system.effectiveUserID
+        let library = try fileSystem.openDirectory(
+            named: "Library",
+            relativeTo: home,
+            expecting: HostNodeExpectation(owner: owner, kind: .directory)
+        )
+        try system.createDirectoryIfMissing(
+            named: "Application Support",
+            relativeTo: library.fileDescriptor,
+            mode: 0o700
+        )
+        let applicationSupport = try fileSystem.openDirectory(
+            named: "Application Support",
+            relativeTo: library,
+            expecting: HostNodeExpectation(owner: owner, kind: .directory)
+        )
+        return try Self.ensureDeveloperImageStoreAnchor(
+            in: applicationSupport,
+            fileSystem: fileSystem,
+            owner: owner
+        )
+    }
+
+    static func ensureDeveloperImageStoreAnchor(
+        in applicationSupport: AnchoredDirectory,
+        fileSystem: AnchoredFileSystem,
+        owner: uid_t
+    ) throws -> AnchoredDirectory {
+        let product = try fileSystem.ensureDirectory(
+            named: "PulsePhone",
+            relativeTo: applicationSupport,
+            owner: owner
+        )
+        return try fileSystem.ensureDirectory(
+            named: "DeveloperImages",
+            relativeTo: product,
+            owner: owner
+        )
+    }
+
     public func openTemporaryBaseAnchor(
         fileSystem: AnchoredFileSystem? = nil
     ) throws -> AnchoredDirectory {

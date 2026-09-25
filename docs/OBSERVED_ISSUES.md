@@ -61,6 +61,7 @@
 | `OBS-034` | Developer Support preparation 未接入生产单飞与 remediation 合同 | High | `resolved` | build 22 iOS 26.5.2 fresh-generation rehydration、Live preflight 与 cleanup 已闭环 |
 | `OBS-035` | `type --text` 第二次调用复用已关闭的 Pasteboard 会话 | High | `resolved` | `f2071f0` 修复；iOS 26.5.2 连续实体输入通过，无粘贴权限弹窗 |
 | `OBS-036` | 高位 ECID 被 Lockdown 整数解析拒绝，导致 iOS 17+ prepare 误报 Developer Support 不可用 | High | `investigating` | 高位 `UniqueChipID` unsigned parsing；等待 packaged candidate 验证 |
+| `OBS-038` | 新用户目录下Runtime启动被Developer Image store目录初始化阻断 | High | `investigating` | anchored首次创建和0700权限回归；等待完整Xcode Gate及fresh packaged验证 |
 
 ## OBS-001：关闭已绑定视频的 live 窗口时 GUIHost 崩溃
 
@@ -1612,3 +1613,23 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
   `queryMounted` 返回 `mounted=true`，`warmGeneration` 随后成功打开全部七项 CoreDevice 服务。
 - 新 packaged candidate 的 `PulsePhone device prepare --udid 0000FE01-8CBDBFB959DA98F8 --json`
   不得再因 `personalization ECID` 失败；若有后续失败，必须报告其新的 typed root cause。
+
+## OBS-038：新用户目录下Runtime启动被Developer Image store目录初始化阻断
+
+### 当前状态
+
+- 状态：`investigating`
+- 发现日期：2026-09-25
+- 严重度：High
+- 影响范围：fresh安装后所有需要冷启动Runtime的公开CLI，包括`apps`；本地Developer Image诊断入口。
+- 合同：TRD 07 §30.2私有目录0700、no-follow；PRD §8公开CLI与§19用户级安装。
+
+### 根因与关闭标准
+
+- 已安装0.2.2在iOS 18.7.8目标上，`devices`成功但`apps --json`在Runtime readiness前返回`internalFailure: runtimeFailed(code: "internalFailure")`。首次运行时`~/Library/Application Support/PulsePhone`不存在；Runtime直接初始化Developer Image store，单级`mkdir(DeveloperImages, 0700)`在父目录缺失时失败。
+- 手动`mkdir -p`使用默认umask 022创建的`PulsePhone/DeveloperImages`均为0755；store要求owned且精确0700，因此仍失败。把两目录收紧为0700后，同一已安装App、设备和命令返回`ok=true`、`truncated=false`及完整列表；原始Runtime异常仍被入口泛化为`internalFailure`。
+- 修复必须由产品在首次运行时安全逐级创建私有目录，并让CLI诊断入口共享；已有0755、symlink或非本用户节点仍fail closed，不替用户修改权限。覆盖fresh、重复启动和拒绝错误权限；完整Xcode Gate及fresh packaged在未预建产品目录的环境运行`apps --json`成功后才可关闭。
+
+### 2026-09-25 实施checkpoint
+
+- 分支`codex/fix-runtime-first-launch-store`采用既有AnchoredFileSystem从可信home验证祖先、创建缺失的Application Support与私有两级目录，Runtime和CLI诊断共用。新增fresh、重复调用、缺失Application Support及0755 fail-closed单测。`swift build --target PulsePhoneRuntimeExecutable`和测试源码语法检查通过；当前主机仅选中Command Line Tools，`swift test --filter AnchoredFileSystemTests`因工具链缺少XCTest而未运行到测试，CLI整模块另在未改动的`CLIHelpRenderer.swift:133`发生type-check超时。当前唯一下一动作：在完整Xcode环境运行focused与`make check`，再用fresh packaged候选验证空产品目录冷启动，按结果关闭或继续修复。
