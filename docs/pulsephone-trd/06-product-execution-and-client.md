@@ -875,6 +875,8 @@ Rotate terminal的actual geometry采纳必须是all-or-none GUI transaction：�
 
 #### 27.1.5 Window reservation、实际最小宽度与fullscreen
 
+Live 的native window是唯一的`.fileURL`拖放接收者，覆盖content与native titlebar/toolbar；Install App按钮不单独注册拖放。复用`ToolbarDropTarget`检查单个IPA文件/App目录，在entered/updated阶段给出copy操作和蓝色窗口边框；exited/ended/perform/close清理边框，perform重新检查候选并按dragging sequence去重，通过既有GUI `app.install`提交入口绑定本窗口UDID。边框为hit-test透明的显示浮层，不改变canvas/controls布局、geometry、窗口reservation或输入authority，适配resize/fullscreen。非法候选不得提交，hover不得创建action或启动Runtime。production自动化至少覆盖区域连续性、合法IPA/App、非法/多文件、取消/退出、重复perform、独立多窗口、Runtime不可用、边框透明及resize布局。
+
 AppKit content layout固定为`videoCanvas + sourceControls`两个纵向、不重叠区域；第一阶段`sourceControlsHeight=52 pt`。正式 Live 的 sourceControls 只能只读显示current source摘要和video状态，并提供Change Source图标按钮；不得包含source picker、Preview或Use Source。首次选择、强制纠正、Refresh、thumbnail和人工Preview都属于关联Chooser。`AVSampleBufferDisplayLayer`、interaction view、identity placeholder与overlay只能占用videoCanvas；native toolbar和source controls都不得进入`visibleImageRect`。稳定windowed状态下canvas host bounds必须等于`visibleImageRect`，不得存在未被video占用的横向或纵向区域；fullscreen和stable presentation尚未提交的有界过渡可使用黑色非坐标letterbox。
 
 bound session使用current committed presentation ratio；placeholder使用§27.1.2的fallback authority。window sizing使用`contentHeight = canvasHeight + sourceControlsHeight`并另计AppKit实际titlebar/toolbar chrome，禁止把包含source controls的整个`NSWindow.contentAspectRatio`设为设备比例。

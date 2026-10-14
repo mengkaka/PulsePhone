@@ -989,7 +989,7 @@ ready 后全部入口零额外等待。Capture 关闭只做 release-all 和 inte
 | 90 | Keyboard Capture | checked toggle |
 | 100 | Toggle Software Keyboard | momentary icon button |
 | 110 | Preview Audio | checked toggle；选中=Mac，未选中=Off |
-| 120 | Install App | momentary icon button + IPA/App drop |
+| 120 | Install App | momentary icon button；IPA/App drop 由整个 Live 窗口接收 |
 
 第一阶段不显示 Touch 状态 item，也不显示 Hardware Keyboard toggle。
 
@@ -1025,6 +1025,10 @@ preview frame 必须匹配目标 UDID、source/connection epoch 和 geometry rev
 root 与 fallback child 是两个 append-once action。Client 只写 root terminal，Runtime 只写 child terminal；两者不得共用 actionID，也不得由 Client 和 Runtime 对同一 actionID 分别写 terminal。
 
 ### 9.10 App 安装
+
+Live 窗口整体接受单个 `.ipa`普通文件或 `.app`目录的文件拖放，范围包括视频画面、底部控制区和顶部工具栏/标题栏。合法候选进入窗口后显示蓝色边框，跨窗口内区域移动不得闪烁；拖出窗口、取消、松开或关闭窗口时清除边框。多个文件、其他格式或节点类型不匹配的候选不显示可安装边框，不提交安装。边框只提供反馈，不截获普通点击、设备手势或键盘输入，并随窗口缩放/fullscreen适配。
+
+在窗口内松开合法候选时，向该窗口绑定的设备提交且仅提交一次 `app.install`，沿用 Install App 的参数校验、进度和终态展示。顶部按钮只保留点击选择器入口，不作为独立拖放接收者。拖入/移动仅进行本地路径与节点类型检查，不启动Runtime、不创建action、不读取或验证包内容；签名、平台和包内容检查仍由现有安装流程负责。Runtime不可用时，松开后沿用明确的 `runtimeNotRunning` 状态；关闭窗口不取消已accepted安装。
 
 文件选择器只采集参数，不创建 Product Action、不启动 Runtime、不写 ActionLog。用户选择合法 `.ipa`文件或 `.app`目录，或完成合法drop 后才创建 `app.install`。
 
