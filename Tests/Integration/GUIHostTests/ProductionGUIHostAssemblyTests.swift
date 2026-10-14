@@ -148,6 +148,8 @@ final class ProductionGUIHostAssemblyTests: XCTestCase {
             atPath: ipa.path,
             contents: Data([1])
         ))
+        let app = directory.appendingPathComponent("Fixture.app")
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: false)
         let target = try CanonicalUDID(canonicalString: "M2031-GUI-INSTALL")
         let attached = expectation(description: "runtime attached")
         let closed = expectation(description: "runtime closed")
@@ -162,6 +164,7 @@ final class ProductionGUIHostAssemblyTests: XCTestCase {
             nil,
             directory.appendingPathComponent("Invalid.txt").path,
             ipa.path,
+            app.path,
             ipa.path,
         ]
         let controller = ProductionGUIHostWindowController(
@@ -218,6 +221,13 @@ final class ProductionGUIHostAssemblyTests: XCTestCase {
             session.submissions.last?.arguments,
             ["ipaPath": ipa.path]
         )
+
+        button.performClick(nil)
+        try await waitUntil {
+            session.submissions.last?.arguments == ["ipaPath": app.path]
+                && status.stringValue == "Installed com.example.Fixture"
+        }
+        XCTAssertEqual(session.submissions.filter { $0.commandID == "app.install" }.count, 2)
 
         session.simulateTransportFailure()
         await fulfillment(of: [closed], timeout: 3)
