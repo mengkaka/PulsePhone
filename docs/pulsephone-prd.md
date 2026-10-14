@@ -116,7 +116,7 @@ CLI
 - 不承诺未形成精确真机证据的宽泛 iOS 版本能力。
 - 不提供图形化设备选择页或 `live --debug-device-picker`。
 - 不提供公开 daemon 命令、`--force` stop 或公开 job 恢复接口。
-- 不提供 `.app` bundle 安装，只支持 `.ipa`。
+- 不提供模拟器或macOS `.app` 安装；支持签名的iPhone真机 `.app` bundle及 `.ipa`。
 - 不提供 GUI Launch、GUI Uninstall。
 - 不提供公开 `keyboard enable/disable`、Hardware Keyboard toggle 或 Clipboard Sync。
 - 不提供 Software Keyboard show/hide、可见状态查询或 checked state API；只提供无状态 Toggle 动作。
@@ -538,7 +538,7 @@ PulsePhone text input-source next [--udid <UDID>]
 ### 8.7 App 管理
 
 ```sh
-PulsePhone install --path <app.ipa> [--udid <UDID>]
+PulsePhone install --path <app.ipa|App.app> [--udid <UDID>]
 PulsePhone uninstall --bundle-id <bundleID> [--udid <UDID>]
 PulsePhone launch --bundle-id <bundleID> [--env KEY=VALUE ...] [--udid <UDID>]
 PulsePhone apps [--udid <UDID>]
@@ -546,13 +546,13 @@ PulsePhone apps [--udid <UDID>]
 
 要求：
 
-- install 只接受 `.ipa`，不自动 launch。
+- install接受 `.ipa`普通文件或Xcode构建的iPhone真机 `.app`目录，不自动launch、导出签名或重新签名。`.app`须有有效Info.plist、bundle ID、APPL类型、iPhoneOS平台及含arm64的可执行Mach-O；拒绝模拟器/macOS产物，以`invalidIPA`和`stage=appPlatform`明确区分平台错误。
 - install/uninstall 使用 classic installation service，iOS 14～16 与 iOS 17+ 共用同一产品语义。
 - launch 在 iOS 17+ 使用 CoreDevice AppService；iOS 14～16 仅在 approved Developer Support + DVT 可用时开放。
 - `launch --env KEY=VALUE`可重复，向本次启动的iPhone App进程传入环境变量，不继承Mac进程环境。按首个`=`拆分，允许空值、空格、Unicode和包含`=`的值；同名变量以最后一次为准。变量名须匹配`[A-Za-z_][A-Za-z0-9_]*`且不超过128 UTF-8字节，最多64个变量，最终名字和值的UTF-8字节总和不超过8192，值不能包含NUL；无参数时行为不变。
 - launch沿用先终止已有App进程再启动的策略，使本次环境生效；不保证App保持前台或持续运行。普通日志、成功结果和错误消息不得回显变量值。
 - CLI 发起时把相对路径解析为绝对标准路径；Runtime 不依赖调用方 cwd。
-- IPA 内容采用 execution-time path semantics，不 copy、spool 或 fingerprint。
+- 路径采用execution-time semantics，源IPA直接有界上传；源 `.app`在Helper执行时读取，保留bundle签名、文件权限和内部相对symlink，生成私有临时 `Payload/<name>.app` IPA后复用安装链路，不修改源目录。拒绝根symlink、越界/绝对symlink、特殊文件及读取中变化；在连接安装服务前和提交Install前核验目录树身份/类型/size/mtime/ctime，不在日志记录内容或hash。打包至上传均计入同一30分钟deadline，每次读写至多1MiB；临时目录0700、IPA0600，在正常/失败终态清理。临时IPA使用非ZIP64格式，最多65532个源节点、总归档少于4GiB；超限在提交前拒绝，不把完整产物读入内存。
 - install 一旦 accepted，不因 CLI 超时、CLI 退出或 live 窗口关闭自动取消。
 - `apps` 是 CLI-only 只读查询，使用 classic installation service，兼容 USB iPhone iOS 14+；不增加 GUI 入口，也不提供类型、bundle、placeholder、size 或 system filter。
 - `apps` 返回 installation database 中 `CFBundlePackageType=APPL` 且没有精确小写 `hidden` SpringBoard tag 的 User App 与 System App。它不读取当前 SpringBoard icon layout，因此主屏 page、dock、folder、App Library 或 icon preference 不改变成员资格。
@@ -989,7 +989,7 @@ ready 后全部入口零额外等待。Capture 关闭只做 release-all 和 inte
 | 90 | Keyboard Capture | checked toggle |
 | 100 | Toggle Software Keyboard | momentary icon button |
 | 110 | Preview Audio | checked toggle；选中=Mac，未选中=Off |
-| 120 | Install IPA | momentary icon button + IPA drop |
+| 120 | Install IPA | momentary icon button + IPA/App drop |
 
 第一阶段不显示 Touch 状态 item，也不显示 Hardware Keyboard toggle。
 
@@ -1024,11 +1024,11 @@ preview frame 必须匹配目标 UDID、source/connection epoch 和 geometry rev
 
 root 与 fallback child 是两个 append-once action。Client 只写 root terminal，Runtime 只写 child terminal；两者不得共用 actionID，也不得由 Client 和 Runtime 对同一 actionID 分别写 terminal。
 
-### 9.10 IPA 安装
+### 9.10 App 安装
 
-文件选择器只采集参数，不创建 Product Action、不启动 Runtime、不写 ActionLog。用户选择合法 `.ipa` 或完成合法 drop 后才创建 `app.install`。
+文件选择器只采集参数，不创建 Product Action、不启动 Runtime、不写 ActionLog。用户选择合法 `.ipa`文件或 `.app`目录，或完成合法drop 后才创建 `app.install`。
 
-Install App 点击必须打开只允许单个 `.ipa` 普通文件的选择器；该本地参数采集不依赖当前 Live Runtime session。取消选择显示非失败的 `Install cancelled` 状态且不创建 action；选择结果无法通过绝对规范路径、`.ipa` 后缀和普通文件检查时显示 `invalidIPAPath`，不得提交 Runtime。合法选择后若 Live Runtime session 已不可用，则显示 `runtimeNotRunning` 或等价的明确 controls-unavailable 状态，不得静默丢弃提交。
+Install App 点击必须打开允许单个 `.ipa`普通文件或 `.app`目录的选择器；该本地参数采集不依赖当前 Live Runtime session。取消选择显示非失败的 `Install cancelled` 状态且不创建 action；选择结果无法通过绝对规范路径、`.ipa`文件/`.app`目录后缀和对应节点类型检查时显示 `invalidIPAPath`，不得提交 Runtime。合法选择后若 Live Runtime session 已不可用，则显示 `runtimeNotRunning` 或等价的明确 controls-unavailable 状态，不得静默丢弃提交。
 
 合法选择提交后显示进行中状态。terminal success 显示已安装的 bundle ID；terminal failure 显示标准 error code。GUI 日志只允许记录 actionID、commandID、routeID、阶段、终态和按 `redaction.path.v1` 处理后的参数事实，不得记录 IPA 绝对路径。
 
@@ -1243,7 +1243,7 @@ V2  完整发布行已通过；当前没有 V2。
 | `text.inputSource.next` | CLI；iPhone USB iOS 17+ | Control+Space + release barrier；只声明循环请求已派发 | C / iOS 17+ CLI / R0 V0 |
 | `text.key` | CLI allowlisted key/modifier/repeat；iPhone USB iOS 17+ | 物理 HID 宏 + release barrier；不声明最终字符 | C / iOS 17+ CLI / R0 V0 |
 | `text.type` | CLI UTF-8；iPhone USB iOS 17+ | pasteboard SET 后完成 paste/release barrier；不保证 App 显示；不恢复旧 pasteboard | C / iOS 17+ CLI / R0 V0 |
-| `app.install` | CLI + GUI `.ipa`；iPhone USB iOS 14+ | installation backend Complete；不自动 launch；无 rollback/retry | C / iOS 14+ CLI+GUI / R0 V0 |
+| `app.install` | CLI + GUI `.ipa`/真机 `.app`；iPhone USB iOS 14+ | installation backend Complete；不自动 launch；无 rollback/retry | C / iOS 14+ CLI+GUI / R0 V0 |
 | `app.uninstall` | CLI bundleID；iPhone USB iOS 14+ | installation backend Complete；`appNotInstalled`/`uninstallFailed` | C / iOS 14+ CLI / R0 V0 |
 | `app.launch` | CLI bundleID；iOS 17+ 或条件 iOS 14～16 | launch request 完成；不保证持续前台；Developer Support unavailable时精确失败 | C / iOS 17+及条件 iOS 14～16 CLI / R0 V0 |
 | `app.list` | CLI `apps [--udid]`；iPhone USB iOS 14+ | installation Browse 明确 Complete；返回全部符合 package/tag 规则的稳定排序结果；异常或超限 fail closed，无 partial | C / iOS 14+ CLI / R0 V0 |
