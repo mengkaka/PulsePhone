@@ -5072,7 +5072,7 @@ public final class ProductionGUIHostWindowController:
         if retainsFrame {
             state.identityPlaceholderVisible = false
         } else {
-            session?.displayLayer.flushAndRemoveImage()
+            session?.displayLayer.sampleBufferRenderer.flush(removingDisplayedImage: true)
             if let sourceEpoch = state.liveModel.samplePresentation?.sourceEpoch {
                 try? state.liveModel.clearCaptureActiveFormat(
                     throughSourceEpoch: sourceEpoch
@@ -6236,7 +6236,7 @@ private final class ProductionVideoSourcePreviewSink: @unchecked Sendable {
             stopped = true
             frameFormat = nil
         }
-        displayLayer.flushAndRemoveImage()
+        displayLayer.sampleBufferRenderer.flush(removingDisplayedImage: true)
     }
 }
 

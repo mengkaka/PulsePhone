@@ -132,7 +132,11 @@ doctor:
 	DEVELOPER_DIR="$$developer_dir" /usr/bin/xcrun swift --version >/dev/null 2>&1; \
 	/usr/bin/make --version | /usr/bin/sed -n '1p' | /usr/bin/grep '^GNU Make ' >/dev/null; \
 	/usr/bin/git --version >/dev/null; \
-	go version | /usr/bin/grep '^go version go1.26.2 ' >/dev/null; \
+	go_version="$$(go version)"; \
+	if ! /usr/bin/printf '%s\n' "$$go_version" | /usr/bin/grep -E '^go version go1[.]26[.][0-9]+ ' >/dev/null; then \
+		/usr/bin/printf 'pulsephone-doctor.v1 state=failed reason=unsupported-go expected=1.26.x actual=%s\n' "$$go_version" >&2; \
+		exit 1; \
+	fi; \
 	/usr/bin/printf 'pulsephone-doctor.v1 state=passed\n'
 
 build-go:

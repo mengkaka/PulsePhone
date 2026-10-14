@@ -62,9 +62,13 @@ enum ProductionSampleBufferDisplay {
         guard let displaySample = makeImmediateDisplayCopy(sampleBuffer) else {
             return
         }
-        if displayLayer.status == .failed {
-            displayLayer.flushAndRemoveImage()
+        // Apple's renderer API supports background enqueue (macOS 14+).
+        // Calling the layer's legacy enqueue sends CMSampleBuffer across
+        // MainActor isolation in newer SDKs and breaks capture-queue timing.
+        let renderer = displayLayer.sampleBufferRenderer
+        if renderer.status == .failed {
+            renderer.flush(removingDisplayedImage: true)
         }
-        displayLayer.enqueue(displaySample)
+        renderer.enqueue(displaySample)
     }
 }

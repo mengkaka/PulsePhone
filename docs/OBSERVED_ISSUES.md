@@ -61,7 +61,7 @@
 | `OBS-034` | Developer Support preparation 未接入生产单飞与 remediation 合同 | High | `resolved` | build 22 iOS 26.5.2 fresh-generation rehydration、Live preflight 与 cleanup 已闭环 |
 | `OBS-035` | `type --text` 第二次调用复用已关闭的 Pasteboard 会话 | High | `resolved` | `f2071f0` 修复；iOS 26.5.2 连续实体输入通过，无粘贴权限弹窗 |
 | `OBS-036` | 高位 ECID 被 Lockdown 整数解析拒绝，导致 iOS 17+ prepare 误报 Developer Support 不可用 | High | `investigating` | 高位 `UniqueChipID` unsigned parsing；等待 packaged candidate 验证 |
-| `OBS-038` | 新用户目录下Runtime启动被Developer Image store目录初始化阻断 | High | `investigating` | 首次创建、已有目录权限兼容及no-follow回归通过；等待主线构建环境修复及fresh packaged验证 |
+| `OBS-038` | 新用户目录下Runtime启动被Developer Image store目录初始化阻断 | High | `investigating` | 目录回归和完整构建通过；等待完整Gate及fresh packaged验证 |
 
 ## OBS-001：关闭已绑定视频的 live 窗口时 GUIHost 崩溃
 
@@ -1652,3 +1652,10 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 
 - 按owner授权，将`codex/first-install-fixes`的7个提交快进合入`main`（`b8361bb -> 9fa73a9`），包括首次启动目录初始化/已有目录权限兼容、安装器PATH与输出、`launch --env`。`PulsePhone-first-install-fixes`工作区已删除，6份验证日志已校验复制到主工作区的`build/observations/launch-environment-20261014/`；其他工作区保持原状。
 - 在`PulsePhone-public`的合并后`main`上复跑`make build`，仍在`ProductionSampleBufferDisplay.swift:68`遇到`displaySample`并发隔离编译错误；`make check`仍因doctor要求Go 1.26.2、本机Go 1.26.8而停止。日志位于`build/observations/first-install-main-integration-20261014/`。本checkpoint没有更新可发布App产物，也未执行fresh-user packaged或`launch --env`实机验收；OBS继续保持`investigating`，下一动作仍为解决既有构建/工具链阻塞后完成正式candidate与新用户验收。
+
+### 2026-10-14 构建与工具链修复
+
+- 根因：Xcode 27 SDK将`AVSampleBufferDisplayLayer`的旧enqueue入口隔离到MainActor，后台capture路径传入非Sendable的`CMSampleBuffer`触发Swift 6.4编译错误。改用macOS 14起可用、Apple明确支持后台enqueue的`sampleBufferRenderer`，保留副本attachments和同步投递/计时边界；失败恢复与清屏一并使用renderer，不混用layer旧渲染入口。没有关闭并发检查或添加unchecked Sendable来绕过错误。合同提交`91bc277`。
+- Go doctor改为接受稳定版`1.26.x`，保留go.mod的1.26.2推荐基线和`GOTOOLCHAIN=local`。通过实际doctor执行验证1.26.0/2/8/10接受，1.25、1.27、rc、devel和错误分隔符拒绝；当前Go 1.26.8通过。完整`make build`和26项Python tooling测试通过。首轮完整`make check`暴露既有Wire断言漏列已实现的`capabilityResults`、README生成模板未同步此前安装器/目录/launch及OmniParser文字的问题，已按既有schema与README校准断言、模板及README hash fixture；另有两个packaging调用因未提交工作区被clean-tree guard拒绝，必须提交后重跑，不绕过该guard。
+- 新构建debug executable放在仅含Registries/Schemas的临时App路径执行`launch --help`，确认包含`--env <KEY=VALUE>...`、重复覆盖/空值/限制说明及示例；README、PRD、TRD和既有CLI help断言均已覆盖。本smoke不属于正式packaged验收。
+- 证据目录：`build/observations/build-toolchain-20261014/`（build/check、Python tooling及launch help日志）。下一动作：完成完整Gate，再生成正式candidate并在没有预建PulsePhone产品目录的新用户环境完成packaged验收；OBS保持`investigating`，`launch --env`实机状态仍为`DV-013/notTested`。

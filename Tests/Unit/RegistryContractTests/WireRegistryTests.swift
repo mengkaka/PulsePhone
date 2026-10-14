@@ -213,7 +213,7 @@ final class WireRegistryTests: XCTestCase {
         XCTAssertEqual(
             Set(try objectValue(result, "properties").members.map(\.key)),
             [
-                "assetDisposition", "capabilityIDs", "connectionEpoch",
+                "assetDisposition", "capabilityIDs", "capabilityResults", "connectionEpoch",
                 "disposition", "executorGeneration", "mountDisposition",
                 "preparationAttemptID", "preparationGroupID", "provenance",
                 "serviceDisposition",

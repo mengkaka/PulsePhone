@@ -2682,7 +2682,7 @@ private final class ProductionSourcePreviewSink: @unchecked Sendable {
     @MainActor
     func stop() {
         lock.withLock { stopped = true }
-        displayLayer.flushAndRemoveImage()
+        displayLayer.sampleBufferRenderer.flush(removingDisplayedImage: true)
     }
 }
 
