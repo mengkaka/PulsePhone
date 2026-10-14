@@ -2496,6 +2496,8 @@ packaging 必须保留 registry canonical bytes/hash fixture 所对应的文件�
 
 ### 38.4 Generated output
 
+开发与验证使用本机稳定版 Go `1.26.x`（包括 `1.26.0`）；`make doctor`拒绝其他minor系列、预发布及devel版本。`GoHelpers/go.mod`中的`toolchain go1.26.2`保留为推荐基线，不作为精确patch版本门禁；build/test/dependency校验继续使用`GOTOOLCHAIN=local`，不自动下载或切换工具链。
+
 ```text
 .build/
   SwiftPM objects, modules and test products

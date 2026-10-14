@@ -818,6 +818,8 @@ GUI不得用`try?`把capture-ready transport/protocol failure折叠成`nil`。st
 
 首个有效sample建立`formatRevision=1`和session normalized shape。之后每个identity-valid、format-valid sample必须先进入display enqueue路径，再独立驱动下列candidate state machine；candidate/debounce/window work不得成为enqueue前置条件：
 
+display enqueue使用macOS 14起提供的`AVSampleBufferDisplayLayer.sampleBufferRenderer`：renderer允许从capture后台线程同步投递，避免将非Sendable的`CMSampleBuffer`跨MainActor传递给layer的旧enqueue入口。sample仍须复制并在副本上设置DisplayImmediately；失败恢复和清屏统一使用该renderer的flush，不混用layer的旧AVQueuedSampleBufferRendering方法。不得为适配SDK actor标注而把production capture enqueue异步搬到主线程或改变既有计时边界；layer挂载和窗口UI仍由MainActor负责。
+
 ```text
 same exact dimensions
   -> no presentation mutation
