@@ -345,6 +345,8 @@ PulsePhone runtime status [--udid <UDID>]
 - `version`只返回当前app bundle声明的版本与build，不探测设备或Runtime。
 - `self install`把当前app copy安装或升级到`~/Applications/PulsePhone.app`，并把`~/.local/bin/PulsePhone`协调为指向已安装主executable的absolute symlink；两个`~`都来自effective UID对应的可信login home，不读取`HOME`。
 - `self install`不使用`sudo`，不写`/Applications`、`/usr/local/bin`或shell profile，不显示GUI、不自动重启Runtime/GUI；调用本身即表示用户同意在确需复制时终止当前用户的活跃PulsePhone会话。
+- 外部`Scripts/install-pulsephone`在`self install`成功后，对已识别的zsh/bash用户shell安全、幂等地写入当前用户的shell profile，使`~/.local/bin`在后续终端中可用；已有配置不重复追加，即使安装时调用环境的`PATH`已经包含launcher目录也须保证持久配置。安装脚本不使用`sudo`；通过管道启动的子shell不能改变调用终端的环境，当前`PATH`缺失时仅打印一行可复制的`export PATH=...`供立即生效。无法可靠识别shell、可信login home与`HOME`不一致或profile节点不安全时，不写profile，给出已安装executable绝对路径和人工提示，不猜测配置文件。
+- Bash按`.bash_profile`、`.bash_login`、`.profile`的顺序更新首个既有login profile；均不存在时才创建`.bash_profile`，同时配置`.bashrc`。不得通过新建更高优先级profile使用户原有login配置失效。
 - `skill install`的调用本身表示用户授权其在必要时执行与`self install`相同的用户级App安装或升级并终止经身份复核的活跃PulsePhone进程；Agent不得把用户要求设备操作或加载skill视为该授权，代用户调用前必须取得明确确认。
 - `skill install`至少需要一个`--agent`或`--skill-root`。`--agent codex`安装到可信login home下的`.codex/skills/pulsephone`并包含`agents/openai.yaml`；`--agent claude-code`安装到`.claude/skills/pulsephone`且只包含portable payload；`--agent all`等价于两个内置目标。重复目标去重。
 - `--skill-root`可重复且必须是绝对规范目录；每个root下固定创建`pulsephone/`，当前portable payload只有`SKILL.md`，不写平台专属元数据或完整app。未来portable payload可以增加被`SKILL.md`直接引用的`scripts/`、`references/`或`assets/`，但仍不得携带app。

@@ -61,6 +61,7 @@
 | `OBS-034` | Developer Support preparation 未接入生产单飞与 remediation 合同 | High | `resolved` | build 22 iOS 26.5.2 fresh-generation rehydration、Live preflight 与 cleanup 已闭环 |
 | `OBS-035` | `type --text` 第二次调用复用已关闭的 Pasteboard 会话 | High | `resolved` | `f2071f0` 修复；iOS 26.5.2 连续实体输入通过，无粘贴权限弹窗 |
 | `OBS-036` | 高位 ECID 被 Lockdown 整数解析拒绝，导致 iOS 17+ prepare 误报 Developer Support 不可用 | High | `investigating` | 高位 `UniqueChipID` unsigned parsing；等待 packaged candidate 验证 |
+| `OBS-038` | 新用户目录下Runtime启动被Developer Image store目录初始化阻断 | High | `investigating` | 首次创建/0700/no-follow回归通过；等待主线构建环境修复及fresh packaged验证 |
 
 ## OBS-001：关闭已绑定视频的 live 窗口时 GUIHost 崩溃
 
@@ -1612,3 +1613,33 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
   `queryMounted` 返回 `mounted=true`，`warmGeneration` 随后成功打开全部七项 CoreDevice 服务。
 - 新 packaged candidate 的 `PulsePhone device prepare --udid 0000FE01-8CBDBFB959DA98F8 --json`
   不得再因 `personalization ECID` 失败；若有后续失败，必须报告其新的 typed root cause。
+
+## OBS-038：新用户目录下Runtime启动被Developer Image store目录初始化阻断
+
+### 当前状态
+
+- 状态：`investigating`
+- 发现日期：2026-09-25
+- 严重度：High
+- 影响范围：fresh安装后所有需要冷启动Runtime的公开CLI，包括`apps`；本地Developer Image诊断入口。
+- 合同：TRD 07 §30.2私有目录0700、no-follow；PRD §8公开CLI与§19用户级安装。
+
+### 根因与关闭标准
+
+- 已安装0.2.2在iOS 18.7.8目标上，`devices`成功但`apps --json`在Runtime readiness前返回`internalFailure: runtimeFailed(code: "internalFailure")`。首次运行时`~/Library/Application Support/PulsePhone`不存在；Runtime直接初始化Developer Image store，单级`mkdir(DeveloperImages, 0700)`在父目录缺失时失败。
+- 手动`mkdir -p`使用默认umask 022创建的`PulsePhone/DeveloperImages`均为0755；store要求owned且精确0700，因此仍失败。把两目录收紧为0700后，同一已安装App、设备和命令返回`ok=true`、`truncated=false`及完整列表；原始Runtime异常仍被入口泛化为`internalFailure`。
+- 修复必须由产品在首次运行时安全逐级创建私有目录，并让CLI诊断入口共享；已有0755、symlink或非本用户节点仍fail closed，不替用户修改权限。覆盖fresh、重复启动和拒绝错误权限；完整Xcode Gate及fresh packaged在未预建产品目录的环境运行`apps --json`成功后才可关闭。
+
+### 2026-09-25 实施checkpoint
+
+- 分支`codex/fix-runtime-first-launch-store`采用既有AnchoredFileSystem从可信home验证祖先、创建缺失的Application Support与私有两级目录，Runtime和CLI诊断共用。新增fresh、重复调用、缺失Application Support及0755 fail-closed单测。`swift build --target PulsePhoneRuntimeExecutable`和测试源码语法检查通过；当前主机仅选中Command Line Tools，`swift test --filter AnchoredFileSystemTests`因工具链缺少XCTest而未运行到测试，CLI整模块另在未改动的`CLIHelpRenderer.swift:133`发生type-check超时。当前唯一下一动作：在完整Xcode环境运行focused与`make check`，再用fresh packaged候选验证空产品目录冷启动，按结果关闭或继续修复。
+- 源码、回归和合同checkpoint提交`0e57b63`；尚未作为经过完整Gate的候选合并到main。
+
+### 2026-10-14 独立修复分支复核
+
+- 从公开`main`的`b8361bb`创建`codex/first-install-fixes`，迁入`0e57b63`的目录初始化修复。Runtime与CLI Developer Image诊断共用`openDeveloperImageStoreAnchor()`，从系统用户数据库确定的home逐级验证并创建缺失私有目录，原先父目录缺失的根因已在实现层修复；没有迁入iPad支持、临时签名或执行服务改动。
+- 在当前Xcode 27 / Swift 6.4环境中，以仅包含仓库原样`PulsePhoneSharedDefinitions`、`PulsePhoneHostPaths`源码及HostPath测试/fixture的临时SwiftPM包运行测试：32项通过，0失败。包含首次创建、缺失Application Support、重复初始化、拒绝既有0755，以及新增的产品目录/存储目录symlink拒绝且不写入外部目标。此结果是模块回归，不替代production packaged验收。
+- `swift build --target PulsePhoneRuntimeExecutable`通过。结构校验、Python tooling校验、Go依赖/生成校验、Go测试及两个Go Helper构建通过。
+- 独立复核同批安装器PATH修改：安装成功后从JSON result取得launcher路径，为zsh/bash幂等配置未来终端，并对当前终端仅输出`export PATH=...`。补修Bash直接新建`.bash_profile`会遮蔽既有`.bash_login`/`.profile`的问题；现按Bash优先级更新既有login profile。安装器13项测试及全部tooling Python 25项测试通过；PRD、TRD 06和README同步最终行为，清除旧版“安装脚本不写profile”的矛盾描述。
+- 当前完整验证仍未通过：`make check`在doctor处因仓库锁定Go 1.26.2、当前Go 1.26.8而停止；`make build`与仓库内`swift test --filter AnchoredFileSystemTests`在未改动的`ProductionSampleBufferDisplay.swift:68`遇到Xcode 27并发检查错误，尚未运行到整包测试。没有将临时验证包的结果描述为整包通过。
+- 唯一下一动作：在满足仓库工具链要求且主线GUI可构建的环境完成`make check`与正式packaging，再在没有预建PulsePhone产品目录的可信新用户环境运行packaged `apps --json`并确认成功；全部关闭标准满足前保留`investigating`。本分支尚未合入main或发布。

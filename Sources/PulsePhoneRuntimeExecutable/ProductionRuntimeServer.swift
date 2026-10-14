@@ -488,9 +488,9 @@ public struct ProductionRuntimeOperationBackend: Sendable {
     // Static developer-image compatibility data is not a Runtime startup
     // dependency. Device preparation pins its own dynamic catalog snapshot.
     let developerImageCatalog: DeveloperImageCatalogV1? = nil
-    let developerImageRoot = URL(
-      fileURLWithPath: try POSIXHostPathSystem()
-                .makeHostPathLayout().developerImageStoreDirectory)
+    let developerImageAnchor = try POSIXHostPathSystem()
+      .openDeveloperImageStoreAnchor()
+    let developerImageRoot = URL(fileURLWithPath: developerImageAnchor.logicalPath)
     let developerImageStore = try DeveloperImageAssetStore(
       rootURL: developerImageRoot
     )
