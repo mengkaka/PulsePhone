@@ -663,6 +663,11 @@ func (backend *Backend) Execute(message protocol.Message) (map[string]any, error
 	if !ok || route == "" {
 		return nil, &ProductError{Code: "invalidArgument", Stage: "requestValidation"}
 	}
+	if route == "coredevice.appLaunch" {
+		if _, err := protocol.LaunchEnvironment(backendPayload); err != nil {
+			return nil, &ProductError{Code: "invalidArgument", Stage: "requestValidation"}
+		}
+	}
 	deadline := backendRequestDeadline(route, time.Now())
 	operation, _ := backendPayload["operation"].(string)
 	if operation == "warmGeneration" {
@@ -1003,6 +1008,10 @@ func (backend *Backend) launch(payload map[string]any, deadline time.Time) (map[
 	if !ok || bundleID == "" || len(bundleID) > 255 {
 		return nil, &ProductError{Code: "invalidArgument", Stage: "requestValidation"}
 	}
+	environment, err := protocol.LaunchEnvironment(payload)
+	if err != nil {
+		return nil, &ProductError{Code: "invalidArgument", Stage: "requestValidation"}
+	}
 	service, err := backend.service(coreDeviceServiceAppControl, deadline)
 	if err != nil {
 		return nil, &ProductError{Code: "developerServicesUnavailable", Stage: "openingInputService"}
@@ -1010,7 +1019,7 @@ func (backend *Backend) launch(payload map[string]any, deadline time.Time) (map[
 	_, err = service.InvokeWithDeadline("com.apple.coredevice.feature.launchapplication", map[string]any{
 		"applicationSpecifier": map[string]any{"bundleIdentifier": map[string]any{"_0": bundleID}},
 		"options": map[string]any{
-			"arguments": []any{}, "environmentVariables": map[string]any{},
+			"arguments": []any{}, "environmentVariables": environment,
 			"standardIOUsesPseudoterminals": true, "startStopped": false,
 			"terminateExisting": true, "user": map[string]any{"shortName": "mobile"},
 			"platformSpecificOptions": []byte("<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict/></plist>"),

@@ -11,14 +11,19 @@ public struct AppLaunchCommand: Sendable {
 
     public func run(
         bundleID: String,
+        environment: [String: String] = [:],
         requestID: CanonicalUUID,
         actionID: CanonicalUUID,
         canonicalUDID: CanonicalUDID,
         outputMode: CLIOutputMode
     ) throws -> CLITerminalOutput {
+        var raw = ["bundleID": bundleID]
+        if !environment.isEmpty {
+            raw["environment"] = try LaunchEnvironment.encode(environment)
+        }
         let arguments = try ArgumentNormalizer.normalize(
-            schemaID: "bundleID.v1",
-            raw: ["bundleID": bundleID]
+            schemaID: "appLaunch.v1",
+            raw: raw
         )
         guard case .string(let canonicalBundleID)? = arguments.values["bundleID"] else {
             throw ArgumentNormalizationError.invalid("bundleID")
@@ -28,7 +33,7 @@ public struct AppLaunchCommand: Sendable {
             actionID: actionID,
             canonicalUDID: canonicalUDID,
             commandID: "app.launch",
-            rawArguments: ["bundleID": canonicalBundleID]
+            rawArguments: raw
         )
         let receipt = try submitter.submit(intent)
         let adapter = CLIOutputAdapter(mode: outputMode)

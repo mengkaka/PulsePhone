@@ -8,6 +8,54 @@ import PulsePhoneWire
 import XCTest
 
 final class ArgumentPreflightDispatcherTests: XCTestCase {
+    func testLaunchRepeatableEnvironmentReachesRuntimeWithoutEchoingValues() throws {
+        let recorder = RuntimeRequestRecorder()
+        let process = PulsePhoneCLIProcess(
+            makeStaticSurface: Self.staticSurface,
+            makeQueries: { LocalDeviceQueries(snapshot: try Self.snapshot()) },
+            makeActionLogMaintenance: Self.missingActionLogMaintenance,
+            runtimeRequest: { operation, _, body, _, _ in
+                recorder.record(operation: operation.rawValue, body: body)
+                return try Self.failedRuntimeResult(code: "runtimeFailed")
+            }
+        )
+        let output = process.run(arguments: [
+            "launch", "--bundle-id", "com.example.App", "--udid", "AAAA", "--json",
+            "--env", "APP_ENV=old", "--env", "EMPTY=",
+            "--env", "MESSAGE=private-test-value 你好=a=b", "--env", "APP_ENV=testing",
+        ])
+        XCTAssertEqual(recorder.lastCommandID, "app.launch")
+        let encoded = try XCTUnwrap(recorder.lastNormalizedArguments?["environment"])
+        XCTAssertEqual(try LaunchEnvironment.decode(encoded), [
+            "APP_ENV": "testing", "EMPTY": "", "MESSAGE": "private-test-value 你好=a=b",
+        ])
+        XCTAssertFalse((output.chunk.stdout + output.chunk.stderr).joined().contains("private-test-value"))
+    }
+
+    func testInvalidLaunchEnvironmentFailsBeforeQueriesAndRuntime() throws {
+        let process = PulsePhoneCLIProcess(
+            makeStaticSurface: Self.staticSurface,
+            makeQueries: { XCTFail("invalid environment must fail before device discovery"); return LocalDeviceQueries(snapshot: try Self.snapshot()) },
+            makeActionLogMaintenance: Self.missingActionLogMaintenance,
+            runtimeRequest: { _, _, _, _, _ in
+                XCTFail("invalid environment must not reach Runtime")
+                return try Self.failedRuntimeResult(code: "runtimeFailed")
+            }
+        )
+        for value in ["MISSING_EQUALS", "=private-test-value", "1BAD=private-test-value", "A=private-test-value\0", "A=" + String(repeating: "x", count: 8_192)] {
+            let output = process.run(arguments: ["launch", "--bundle-id", "com.example.App", "--env", value, "--json"])
+            XCTAssertEqual(output.exitCode, 2)
+            XCTAssertFalse((output.chunk.stdout + output.chunk.stderr).joined().contains("private-test-value"))
+            let envelope = try XCTUnwrap(try json(output.chunk.stdout[0]))
+            XCTAssertEqual((envelope["error"] as? [String: Any])?["code"] as? String, "invalidArgument")
+        }
+        for option in ["--env=API_TOKEN=private-test-value", "API_TOKEN=private-test-value"] {
+            let output = process.run(arguments: ["launch", "--bundle-id", "com.example.App", option, "--json"])
+            XCTAssertEqual(output.exitCode, 2)
+            XCTAssertFalse((output.chunk.stdout + output.chunk.stderr).joined().contains("private-test-value"))
+        }
+    }
+
     func testFactsProbeTimeoutUsesRetryablePublicError() throws {
         let process = PulsePhoneCLIProcess(
             makeStaticSurface: Self.staticSurface,

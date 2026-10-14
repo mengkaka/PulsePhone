@@ -5745,11 +5745,18 @@ public struct ProductionRuntimeOperationBackend: Sendable {
             return ["commandID": .string(commandID)]
         }
         if commandID == "app.launch", let bundleID = arguments["bundleID"] {
-            return [
+            _ = try ArgumentNormalizer.normalize(schemaID: "appLaunch.v1", raw: arguments)
+            var payload: [String: HelperWireJSONValue] = [
                 "bundleID": .string(bundleID),
                 "commandID": .string(commandID),
                 "operation": .string("launch"),
             ]
+            if let encoded = arguments["environment"] {
+                payload["environment"] = .object(
+                    try LaunchEnvironment.decode(encoded).mapValues { .string($0) }
+                )
+            }
+            return payload
         }
         if commandID == "app.install", let ipaPath = arguments["ipaPath"] {
             return [
@@ -6520,7 +6527,7 @@ public final class ProductionRuntimeServer: @unchecked Sendable {
     public static let runtimeBuildID = "pulsephone.runtime.v1"
     public static let runtimeCompatibilityID = "runtime.compat.v4"
     public static let executionCatalogHash =
-    "e7c5d8e1a8436cf0f6fff9b7b6a22f5b34404dbcb636c7b516f016053ae2a1a1"
+    "486a24995f9a337df49587f42e11b3751b6075c211d7b8f6e436219fcf98a21b"
 
     private let canonicalUDID: CanonicalUDID
     private let connectionTimeoutSeconds: Int

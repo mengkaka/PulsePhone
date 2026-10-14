@@ -1,3 +1,5 @@
+import PulsePhoneSharedDefinitions
+
 public enum AppLaunchRoute: String, Equatable, Sendable {
     case legacyDVT = "legacy.dvtLaunch"
     case modernCoreDevice = "coredevice.appLaunch"
@@ -47,8 +49,8 @@ public enum AppLaunchActionError: Error, Equatable, Sendable {
 }
 
 public protocol AppLaunchTransport: Sendable {
-    func launchCoreDevice(bundleID: String) throws
-    func launchLegacyDVT(bundleID: String) throws
+    func launchCoreDevice(bundleID: String, environment: [String: String]) throws
+    func launchLegacyDVT(bundleID: String, environment: [String: String]) throws
     func waitForLaunchComplete(
         route: AppLaunchRoute,
         timeoutMilliseconds: UInt64
@@ -72,9 +74,11 @@ public struct AppLaunchAction: Sendable {
 
     public func execute(
         bundleID: String,
+        environment: [String: String] = [:],
         osMajor: UInt64,
         preparation: AppLaunchPreparation
     ) throws -> AppLaunchExecution {
+        try LaunchEnvironment.validate(environment)
         let route = try AppLaunchRoute.resolve(osMajor: osMajor)
         guard preparation.preparationGroupID == route.preparationGroupID else {
             throw AppLaunchActionError.preparationGroupMismatch(
@@ -96,9 +100,9 @@ public struct AppLaunchAction: Sendable {
         do {
             switch route {
             case .modernCoreDevice:
-                try transport.launchCoreDevice(bundleID: bundleID)
+                try transport.launchCoreDevice(bundleID: bundleID, environment: environment)
             case .legacyDVT:
-                try transport.launchLegacyDVT(bundleID: bundleID)
+                try transport.launchLegacyDVT(bundleID: bundleID, environment: environment)
             }
             guard try transport.waitForLaunchComplete(
                 route: route,

@@ -1,4 +1,5 @@
 import Foundation
+import PulsePhoneSharedDefinitions
 
 public enum ArgumentNormalizationError: Error, Equatable, Sendable {
   case unexpectedKeys
@@ -54,6 +55,21 @@ public enum ArgumentNormalizer {
         throw ArgumentNormalizationError.invalid("bundleID")
       }
       return NormalizedArgumentsV1(values: ["bundleID": .string(value)])
+    case "appLaunch.v1":
+      guard Set(raw.keys).isSubset(of: ["bundleID", "environment"]) else {
+        throw ArgumentNormalizationError.unexpectedKeys
+      }
+      var values = try normalize(
+        schemaID: "bundleID.v1", raw: ["bundleID": try required(raw, "bundleID")]
+      ).values
+      if let encoded = raw["environment"] {
+        do {
+          values["environment"] = .string(try LaunchEnvironment.encode(LaunchEnvironment.decode(encoded)))
+        } catch {
+          throw ArgumentNormalizationError.invalid("environment")
+        }
+      }
+      return NormalizedArgumentsV1(values: values)
     case "ipaPath.v1":
       return try normalizedPath(raw, key: "ipaPath", requiredSuffix: ".ipa")
     case "outputPath.v1":

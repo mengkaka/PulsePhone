@@ -637,3 +637,74 @@ func (support *fakeBackendPersonalizedSupport) Execute(rawUDID string, connectio
 func (support *fakeBackendPersonalizedSupport) Close() {
 	support.closed = true
 }
+
+func TestLaunchEnvironmentReachesCoreDeviceRequest(t *testing.T) {
+	for _, environment := range []map[string]any{nil, {"APP_ENV": "testing", "EMPTY": "", "MESSAGE": "你好 hello=a=b"}} {
+		client, server := net.Pipe()
+		done := make(chan error, 1)
+		go func() {
+			defer server.Close()
+			frame, err := ReadHTTP2Frame(server, RemoteXPCMaxFrame)
+			if err != nil {
+				done <- err
+				return
+			}
+			wrapper, err := DecodeXPCWrapper(frame.Payload, RemoteXPCMaxMessage)
+			if err != nil {
+				done <- err
+				return
+			}
+			request := wrapper.Payload.(map[string]any)
+			input := request["CoreDevice.input"].(map[string]any)
+			options := input["options"].(map[string]any)
+			expected := environment
+			if expected == nil {
+				expected = map[string]any{}
+			}
+			if !reflect.DeepEqual(options["environmentVariables"], expected) || options["terminateExisting"] != true {
+				done <- errors.New("CoreDevice environment or terminateExisting changed")
+				return
+			}
+			payload, err := EncodeXPCWrapper(map[string]any{"CoreDevice.output": map[string]any{}}, 0, false)
+			if err != nil {
+				done <- err
+				return
+			}
+			raw, err := (HTTP2Frame{Type: HTTP2Data, StreamID: 1, Payload: payload}).Encode()
+			if err == nil {
+				_, err = server.Write(raw)
+			}
+			done <- err
+		}()
+		backend := &Backend{tunnel: &CoreDeviceTunnelLease{}, services: map[string]*CoreDeviceService{
+			coreDeviceServiceAppControl: {remote: NewRemoteXPCConnection(client)},
+		}}
+		payload := map[string]any{"bundleID": "com.example.App"}
+		if environment != nil {
+			payload["environment"] = environment
+		}
+		result, err := backend.launch(payload, time.Now().Add(time.Second))
+		client.Close()
+		serverErr := <-done
+		if err != nil || serverErr != nil {
+			t.Fatalf("launch error=%v service=%v", err, serverErr)
+		}
+		if _, present := result["environment"]; present {
+			t.Fatal("environment leaked in result")
+		}
+	}
+}
+
+func TestInvalidLaunchEnvironmentFailsBeforeTunnelOpen(t *testing.T) {
+	backend := &Backend{}
+	for _, raw := range []any{nil, "private-test-value", map[string]any{"BAD-NAME": "private-test-value"}, map[string]any{"A": 1}, map[string]any{"A": "private-test-value\x00"}} {
+		_, err := backend.Execute(protocol.Message{Payload: map[string]any{
+			"executorOperationID": "coredevice.appLaunch",
+			"backendPayload":      map[string]any{"bundleID": "com.example.App", "environment": raw},
+		}})
+		var failure *ProductError
+		if !errors.As(err, &failure) || failure.Code != "invalidArgument" || failure.Stage != "requestValidation" {
+			t.Fatalf("invalid environment reached tunnel: %v", err)
+		}
+	}
+}

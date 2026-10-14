@@ -4,7 +4,7 @@
 >
 > 基线日期：2026-07-18
 >
-> Command Matrix：`command-matrix.v17-20260822`
+> Command Matrix：`command-matrix.v18-20261014`
 >
 > 默认交付规范：`default-product-delivery.v1-20260722`
 

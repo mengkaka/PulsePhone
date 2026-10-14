@@ -30,7 +30,7 @@ CLI/GUI exposure
 redaction policy
 ```
 
-`matrixRevision=command-matrix.v17-20260822`：
+`matrixRevision=command-matrix.v18-20261014`：
 
 ```text
 Product Action rows       52

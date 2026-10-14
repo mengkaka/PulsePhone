@@ -7,7 +7,7 @@ Use PulsePhone on supported iPhones without installing Xcode. It does not instal
 
 ## Public Contract
 
-- Command matrix: `command-matrix.v17-20260822`
+- Command matrix: `command-matrix.v18-20261014`
 - Product Actions: 52
 - Supporting Actions: 21
 - Non-command features: 6
@@ -62,7 +62,7 @@ Every public command supports human output and `--json`; success is written to s
 | Invocation | Command ID | Shape | Argument | Result | Scope |
 | --- | --- | --- | --- | --- | --- |
 | `PulsePhone install` | `app.install` | `oneShot` | `ipaPath.v1` | `appOperationResult.v1` | `capability` |
-| `PulsePhone launch` | `app.launch` | `oneShot` | `bundleID.v1` | `appOperationResult.v1` | `capability` |
+| `PulsePhone launch` | `app.launch` | `oneShot` | `appLaunch.v1` | `appOperationResult.v1` | `capability` |
 | `PulsePhone apps` | `app.list` | `oneShot` | `optionalTarget.v1` | `appListResult.v1` | `capability` |
 | `PulsePhone uninstall` | `app.uninstall` | `oneShot` | `bundleID.v1` | `appOperationResult.v1` | `capability` |
 | `PulsePhone button app-switcher` | `button.appSwitcher` | `oneShot` | `optionalTarget.v1` | `actionAckResult.v1` | `capability` |
@@ -129,6 +129,16 @@ Toolbar order is catalog-owned and stable for a window lifetime. Pointer and key
 | `live.close` | `window` | - | `productGate` |
 | `screenshot.gui` | `toolbar` | 80 | `capability` |
 
+## Launch Environment
+
+Launch an app with environment variables (repeat `--env`; the last value for a name wins):
+
+```sh
+PulsePhone launch --bundle-id com.example.App --env APP_ENV=testing --env 'DISPLAY_NAME=Hello World'
+```
+
+Values may be empty or contain `=`. Names use `[A-Za-z_][A-Za-z0-9_]*` (up to 128 bytes); at most 64 variables and 8192 total UTF-8 bytes of names and values, with no NUL. PulsePhone restarts an existing app process to apply these variables and does not inherit the Mac environment. Environment values are omitted from normal output and logs.
+
 ## Execution Boundaries
 
 - Commands bind to one canonical UDID and connection epoch; unverified video source mappings remain identity placeholders.
@@ -148,6 +158,6 @@ make verify-m2-gate
 
 Tracked projections:
 
-- `Fixtures/product-matrix/public-surface.v1.json` `d3ebb6d33e2d1da8352754baa9e6aa73f11b8ec599b14abc0a39ca46e24dcf3d`
+- `Fixtures/product-matrix/public-surface.v1.json` `b2feec1026c4d0d7770dd3c15746873825ef1fae9df5c05fa6ad3b2c275ef12b`
 - `Fixtures/product-matrix/behavior-matrix.v1.json` `fc4562b270abee08d1655c0ab197b534d08a5fee304782cc37cc448d753229b6`
 - `Fixtures/product-matrix/integration-coverage.v1.json` `f1a1c64f8c32af2b3174911d21a230056f921186a23e2f7911b6e7a6187e9ca1`

@@ -680,7 +680,21 @@ public struct PulsePhoneCLIProcess: Sendable {
                 parsed: parsed,
                 adapter: adapter
             )
-        case "app.launch", "app.uninstall":
+        case "app.launch":
+            var arguments = ["bundleID": try required(parsed, "--bundle-id")]
+            if let assignments = parsed.repeatedValues["--env"] {
+                arguments["environment"] = try LaunchEnvironment.encode(
+                    LaunchEnvironment.parse(assignments)
+                )
+            }
+            return try submit(
+                commandID: "app.launch",
+                schemaID: "appLaunch.v1",
+                rawArguments: arguments,
+                parsed: parsed,
+                adapter: adapter
+            )
+        case "app.uninstall":
             return try submit(
                 commandID: invocation.commandID,
                 schemaID: "bundleID.v1",
@@ -1645,6 +1659,15 @@ public struct PulsePhoneCLIProcess: Sendable {
                     target: target,
                     adapter: adapter
                 )
+            case is LaunchEnvironmentError:
+                return try standardFailure(
+                    code: "invalidArgument",
+                    commandID: commandID,
+                    target: target,
+                    adapter: adapter,
+                    message: "Invalid --env; use KEY=VALUE with a valid name and the limits shown in launch --help.",
+                    details: ["argumentName": "--env"]
+                )
             case let error as ArgumentNormalizationError:
                 let failure = Self.normalizationArgumentFailure(
                     error,
@@ -1659,6 +1682,16 @@ public struct PulsePhoneCLIProcess: Sendable {
                     details: failure.details
                 )
             case let error as CLIOptionParserError:
+                if commandID == "app.launch", case .unknownOption = error {
+                    return try standardFailure(
+                        code: "invalidArgument",
+                        commandID: commandID,
+                        target: target,
+                        adapter: adapter,
+                        message: "Unsupported launch option; use --env KEY=VALUE for each variable. Run launch --help for accepted options.",
+                        details: ["argumentName": "command options"]
+                    )
+                }
                 let failure = Self.optionParserArgumentFailure(error)
                 return try standardFailure(
                     code: "invalidArgument",
@@ -1861,6 +1894,8 @@ public struct PulsePhoneCLIProcess: Sendable {
             return "--duration"
         case "bundleID":
             return "--bundle-id"
+        case "environment":
+            return "--env"
         case "ipaPath":
             return "--path"
         case "outputPath":

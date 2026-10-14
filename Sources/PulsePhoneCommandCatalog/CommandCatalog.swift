@@ -13,7 +13,7 @@ public enum CommandCatalogError: Error, Equatable, Sendable {
 }
 
 public enum CommandCatalog {
-    public static let matrixRevision = "command-matrix.v17-20260822"
+    public static let matrixRevision = "command-matrix.v18-20261014"
     public static let registryRelativePath = "Registries/command-catalog.v1.json"
     public static let schemaRelativePath = "Schemas/command-catalog.v1.schema.json"
     public static let resultSchemaDirectory = "Schemas/result-schemas"
@@ -63,7 +63,7 @@ public enum CommandCatalog {
         let supporting = try array(root, "supportingActions").map(parseSupporting)
         let features = try array(root, "features").map(parseFeature)
         let retainedResultSchemaRefs = try strings(root, "retainedResultSchemaRefs")
-        guard argumentDefinitions.count == 18,
+        guard argumentDefinitions.count == 19,
               globalOptions.count == 1,
               helpGroups.count == 11,
               products.count == 52,

@@ -55,6 +55,29 @@ func TestLaunchRouteCompletesLegacySequenceAndClosesResources(t *testing.T) {
 	}
 }
 
+func TestLaunchRoutePassesEnvironmentAndRejectsInvalidBeforeDeviceAccess(t *testing.T) {
+	events := []string{}
+	lockdown := &fakeLaunchLockdown{events: &events}
+	dtx := &fakeLaunchDTX{events: &events, result: int64(42)}
+	payload := launchTestPayload()
+	environment := map[string]any{"APP_ENV": "testing", "EMPTY": "", "MESSAGE": "你好 hello=a=b"}
+	payload["environment"] = environment
+	result, failure := launchAppWithDependencies(OneShotConfig{RawTransportUDID: "raw-device"}, payload, time.Now().Add(time.Minute), launchTestDependencies(t, &events, lockdown, dtx, true, nil))
+	if failure != nil || !reflect.DeepEqual(dtx.args[2], environment) {
+		t.Fatal("environment not passed to DVT")
+	}
+	if _, present := result["environment"]; present {
+		t.Fatal("environment leaked in result")
+	}
+	for _, invalid := range []any{nil, "private-test-value", map[string]any{"BAD-NAME": "private-test-value"}, map[string]any{"A": 1}, map[string]any{"A": "private-test-value\x00"}} {
+		payload["environment"] = invalid
+		_, failure := launchAppWithDependencies(OneShotConfig{}, payload, time.Now().Add(time.Minute), launchDependencies{})
+		if failure == nil || failure.CommitState != "notCommitted" || failure.Details["stage"] != "requestValidation" {
+			t.Fatal("invalid environment accepted")
+		}
+	}
+}
+
 func TestLaunchRouteProjectsPreAndPostSubmitFailures(t *testing.T) {
 	for _, test := range []struct {
 		name          string

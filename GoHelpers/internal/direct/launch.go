@@ -9,6 +9,8 @@ import (
 	"os"
 	"syscall"
 	"time"
+
+	"pulsephone/GoHelpers/internal/protocol"
 )
 
 const (
@@ -51,11 +53,15 @@ func launchApp(config OneShotConfig, payload map[string]any, deadline time.Time)
 }
 
 func launchAppWithDependencies(config OneShotConfig, payload map[string]any, deadline time.Time, dependencies launchDependencies) (map[string]any, *OperationFailure) {
-	if !sameStringKeys(payload, "bundleID", "commandID", "operation") || payload["commandID"] != "app.launch" || payload["operation"] != "launch" {
+	if !(sameStringKeys(payload, "bundleID", "commandID", "operation") || sameStringKeys(payload, "bundleID", "commandID", "operation", "environment")) || payload["commandID"] != "app.launch" || payload["operation"] != "launch" {
 		return nil, operationFailure("appLaunchFailed", "notCommitted", "failed", "requestValidation")
 	}
 	bundleID, ok := payload["bundleID"].(string)
 	if !ok || !validBundleID(bundleID) {
+		return nil, operationFailure("appLaunchFailed", "notCommitted", "failed", "requestValidation")
+	}
+	environment, err := protocol.LaunchEnvironment(payload)
+	if err != nil {
 		return nil, operationFailure("appLaunchFailed", "notCommitted", "failed", "requestValidation")
 	}
 	if launchDeadlineExceeded(nil, deadline) {
@@ -102,7 +108,7 @@ func launchAppWithDependencies(config OneShotConfig, payload map[string]any, dea
 		return nil, launchStartupFailure(err)
 	}
 	result, err := dtx.invoke(channel, "launchSuspendedProcessWithDevicePath:bundleIdentifier:environment:arguments:options:",
-		"", bundleID, map[string]any{}, []any{}, map[string]any{
+		"", bundleID, environment, []any{}, map[string]any{
 			"StartSuspendedKey": false,
 			"KillExisting":      true,
 		})

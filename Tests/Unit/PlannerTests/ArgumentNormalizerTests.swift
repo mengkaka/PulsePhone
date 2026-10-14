@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import PulsePhoneSharedDefinitions
 
 @testable import PulsePhoneCommandPlanner
 
@@ -17,6 +18,43 @@ private struct ArgumentFixture: Decodable {
 }
 
 final class ArgumentNormalizerTests: XCTestCase {
+  func testLaunchEnvironmentPreservesValuesAndLastAssignment() throws {
+    let environment = try LaunchEnvironment.parse([
+      "APP_ENV=old", "EMPTY=", "MESSAGE=你好 hello=a=b", "APP_ENV=testing",
+    ])
+    XCTAssertEqual(environment, ["APP_ENV": "testing", "EMPTY": "", "MESSAGE": "你好 hello=a=b"])
+    XCTAssertEqual(try LaunchEnvironment.parse(["COMBINING=\u{0301}=value"]), ["COMBINING": "\u{0301}=value"])
+    let normalized = try ArgumentNormalizer.normalize(
+      schemaID: "appLaunch.v1",
+      raw: ["bundleID": "com.example.App", "environment": try LaunchEnvironment.encode(environment)]
+    )
+    XCTAssertEqual(try LaunchEnvironment.decode(XCTUnwrap(normalized.string("environment"))), environment)
+    XCTAssertEqual(try ArgumentNormalizer.normalize(
+      schemaID: "appLaunch.v1", raw: ["bundleID": "com.example.App"]
+    ).values, ["bundleID": .string("com.example.App")])
+    XCTAssertThrowsError(try ArgumentNormalizer.normalize(
+      schemaID: "bundleID.v1", raw: ["bundleID": "com.example.App", "environment": "{}"]
+    ))
+  }
+
+  func testLaunchEnvironmentRejectsMalformedAndOversizedInput() throws {
+    for assignment in ["NO_EQUALS", "=secret", "1BAD=secret", "BAD-NAME=secret", "名=secret", "A=secret\0", String(repeating: "A", count: 129) + "=secret"] {
+      XCTAssertThrowsError(try LaunchEnvironment.parse([assignment])) {
+        XCTAssertEqual($0 as? LaunchEnvironmentError, .invalidEnvironment)
+      }
+    }
+    for encoded in ["[]", "null", "{\"A\":1}", "{\"A\":\"one\",\"A\":\"two\"}", "{\"1A\":\"secret\"}", "{\"A\":\"\\u0000\"}", String(repeating: " ", count: 65_537)] {
+      XCTAssertThrowsError(try ArgumentNormalizer.normalize(
+        schemaID: "appLaunch.v1", raw: ["bundleID": "com.example.App", "environment": encoded]
+      )) { XCTAssertEqual($0 as? ArgumentNormalizationError, .invalid("environment")) }
+    }
+    let limit = ["A": String(repeating: "x", count: 8_191)]
+    XCTAssertNoThrow(try LaunchEnvironment.validate(limit))
+    XCTAssertThrowsError(try LaunchEnvironment.validate(["A": String(repeating: "x", count: 8_192)]))
+    XCTAssertNoThrow(try LaunchEnvironment.validate(Dictionary(uniqueKeysWithValues: (0..<64).map { ("K\($0)", "") })))
+    XCTAssertThrowsError(try LaunchEnvironment.validate(Dictionary(uniqueKeysWithValues: (0..<65).map { ("K\($0)", "") })))
+  }
+
   func testCanonicalFixtureCases() throws {
     let fixture: ArgumentFixture = try loadPlannerFixture(
       "argument-normalization.v1.json"

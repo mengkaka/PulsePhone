@@ -4,13 +4,13 @@
 >
 > 基线日期：2026-07-18
 >
-> Command Matrix：`command-matrix.v17-20260822`
+> Command Matrix：`command-matrix.v18-20261014`
 >
 > Wire Registry：`wire-registry.v9-20260822`
 >
 > Standard Error Registry：`standard-errors.v3-20260822`
 >
-> Planner Contract：`planner-contract.v5-20260805`
+> Planner Contract：`planner-contract.v6-20261014`
 >
 > 默认交付规范：`default-product-delivery.v1-20260722`
 

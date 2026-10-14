@@ -1,7 +1,7 @@
 import PulsePhoneCommandCatalog
 
 public enum PlannerContractVersion {
-  public static let current = "planner-contract.v5-20260805"
+  public static let current = "planner-contract.v6-20261014"
 
   public static func identity(version: String = current) -> PlannerContractIdentity {
     PlannerContractIdentity(
@@ -10,12 +10,16 @@ public enum PlannerContractVersion {
         PlannerRuleIdentity(
           parameters: [
             "bundleIDMaximumBytes": .uint64(255),
+            "launchEnvironmentMaximumVariables": .uint64(64),
+            "launchEnvironmentMaximumNameBytes": .uint64(128),
+            "launchEnvironmentMaximumTotalBytes": .uint64(8_192),
+            "launchEnvironmentMaximumEncodedBytes": .uint64(65_536),
             "gestureDurationMaximumMs": .uint64(30_000),
             "gestureDurationMinimumMs": .uint64(1),
             "pathMaximumBytes": .uint64(4_096),
             "pointFractionMaximumDigits": .uint64(18),
             "supportedSchemaIDs": .stringSet([
-              "bundleID.v1", "elementSnapshot.v1", "guiSavePanel.v1", "guiWindowContext.v1",
+              "appLaunch.v1", "bundleID.v1", "elementSnapshot.v1", "guiSavePanel.v1", "guiWindowContext.v1",
               "ipaPath.v1", "keyboardStream.v1", "linearGesture.v1", "none.v1",
               "normalizedPoint.v1", "optionalTarget.v1", "outputPath.v1",
               "pointerStream.v1", "requiredTarget.v1", "rotateDirection.v1",
@@ -25,7 +29,7 @@ public enum PlannerContractVersion {
             "textMaximumBytes": .uint64(65_536),
           ],
           ruleID: "planner.argument-normalizer.v1",
-          ruleVersion: 1
+          ruleVersion: 2
         ),
         PlannerRuleIdentity(
           parameters: [

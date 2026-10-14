@@ -218,6 +218,9 @@ final class CLIStaticHelpTests: XCTestCase {
         )
         let launch = try renderer.render(.commandPath("launch"))
         XCTAssertTrue(launch.contains("iOS 15-16; USB iPhone; classic Developer Support"))
+        XCTAssertTrue(launch.contains("--env <KEY=VALUE>..."))
+        XCTAssertTrue(launch.contains("8192 total UTF-8 bytes"))
+        XCTAssertTrue(launch.contains("does not inherit the Mac environment"))
     }
 
     private static let repositoryRoot = URL(fileURLWithPath: #filePath)

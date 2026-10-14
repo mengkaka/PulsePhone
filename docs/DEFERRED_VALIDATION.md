@@ -182,6 +182,7 @@ deferred -> ready -> verifying
 - 历史来源：默认交付已经对当前iPhone闭合核心live、pointer、keyboard和部分toolbar/CLI动作，但没有把全部22-row实体command oracle作为同一current candidate完整运行。
 - 当前原因：完整矩阵需要受控设备前台状态、可观察结果、测试文本、测试bundle/IPA和集中人工观察；当前未作为默认交付硬门槛执行。
 - 当前精确范围：`OBS-017`已在source `dfe7c8d`的fresh packaged candidate上用受控unsigned IPA完成CLI与GUI的AFC/InstallationProxy committed rejection矩阵；`OBS-024`进一步在source `7bacda5`上使用受控签名IPA，于iOS 14.4.2 (`18D70`)和iOS 26.5.2 (`23F84`)完成`app.install`成功、`app.uninstall`成功、`appNotInstalled`及恢复安装oracle。其余公开command row和其他exact-build组合仍未作为同一current candidate完整执行。
+- `launch --env`扩展（2026-10-14）：当前分支已实现CLI→Runtime→DVT/CoreDevice传递，并通过147项相关Swift模块回归（独立SwiftPM harness使用原生产模块、复制的测试与fixture，避开GUI构建）、Go全量测试、7项Python registry测试、generated校验与current合同校验；Runtime executable target可构建。证据在`build/observations/launch-environment-20261014/`。完整`make build`仍被`ProductionSampleBufferDisplay.swift:68`的Swift并发编译错误阻断，`make check`的doctor要求Go 1.26.2而本机为1.26.8。环境变量的packaged/实机生效状态为`notTested`：尚未提供可在App内读取并显示进程environment的受控签名测试App；既有launch正向证据不覆盖本扩展。下一次具备测试App、approved Developer Support和可构建candidate时，分别在legacy和modern设备验证重复覆盖、空值、Unicode/含等号值、已有进程重启及不传`--env`的对照。
 - 允许跳过：本条尚未具备前提的未执行command row；已经确认失败的`OBS-004`、`OBS-008`、`OBS-009`、`OBS-010`绝不能借本条跳过。
 - 不得声明：不得把部分toolbar/CLI实体成功扩大成所有公开Product Action均已完成实体oracle。
 - 通过条件：对exact candidate逐row记录app前置状态、提交结果、实体设备业务结果、cleanup和exact device/OS build；`app.install`成功行必须使用受控签名IPA并记录真实bundle ID及安装结果；真实失败创建或关联OBS。

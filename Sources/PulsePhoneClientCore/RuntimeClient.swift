@@ -306,7 +306,7 @@ public final class RuntimeClientElementSnapshotInterruption: @unchecked Sendable
 public enum ProductionRuntimeContractIdentity {
     public static let runtimeCompatibilityID = "runtime.compat.v4"
     public static let executionCatalogHash =
-        "e7c5d8e1a8436cf0f6fff9b7b6a22f5b34404dbcb636c7b516f016053ae2a1a1"
+        "486a24995f9a337df49587f42e11b3751b6075c211d7b8f6e436219fcf98a21b"
 
     public static func load(
         resourcesURL: URL

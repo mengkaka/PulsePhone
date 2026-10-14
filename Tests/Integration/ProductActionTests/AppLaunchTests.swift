@@ -42,6 +42,26 @@ final class AppLaunchTests: XCTestCase {
         XCTAssertEqual(legacy.legacyCount, 1)
     }
 
+    func testEnvironmentIsPassedToBothRoutesAndExcludedFromSuccess() throws {
+        let environment = ["APP_ENV": "private-test-value", "EMPTY": "", "MESSAGE": "你好 a=b"]
+        for (version, group) in [(UInt64(16), "prep.legacy.developer.v2"), (UInt64(26), "prep.coredevice.v2")] {
+            let transport = RecordingAppLaunchTransport(complete: true)
+            _ = try AppLaunchAction(transport: transport).execute(
+                bundleID: "com.example.App", environment: environment, osMajor: version, preparation: ready(group)
+            )
+            XCTAssertEqual(transport.environment, environment)
+            XCTAssertEqual(transport.totalLaunchCount, 1)
+        }
+        let output = try AppLaunchCommand(submitter: CommandSubmitter(runtime:
+            AppLaunchRuntime(outcome: .succeeded, expectedEnvironment: environment)
+        )).run(
+            bundleID: "com.example.App", environment: environment,
+            requestID: uuid(5), actionID: uuid(6), canonicalUDID: CanonicalUDID(canonicalString: "AAAA"), outputMode: .json
+        )
+        XCTAssertEqual(output.exitCode, 0)
+        XCTAssertFalse((output.chunk.stdout + output.chunk.stderr).joined().contains("private-test-value"))
+    }
+
     func testPreparationMustMatchSelectedRouteBeforeBackend() {
         let transport = RecordingAppLaunchTransport(complete: true)
         XCTAssertThrowsError(try AppLaunchAction(transport: transport).execute(
@@ -163,6 +183,7 @@ private final class RecordingAppLaunchTransport: AppLaunchTransport,
     @unchecked Sendable
 {
     private let complete: Bool
+    private(set) var environment = [String: String]()
     private(set) var legacyCount = 0
     private(set) var modernCount = 0
     private(set) var waitCount = 0
@@ -173,13 +194,15 @@ private final class RecordingAppLaunchTransport: AppLaunchTransport,
 
     var totalLaunchCount: Int { legacyCount + modernCount }
 
-    func launchCoreDevice(bundleID: String) throws {
+    func launchCoreDevice(bundleID: String, environment: [String: String]) throws {
         XCTAssertEqual(bundleID, "com.example.App")
+        self.environment = environment
         modernCount += 1
     }
 
-    func launchLegacyDVT(bundleID: String) throws {
+    func launchLegacyDVT(bundleID: String, environment: [String: String]) throws {
         XCTAssertEqual(bundleID, "com.example.App")
+        self.environment = environment
         legacyCount += 1
     }
 
@@ -195,12 +218,15 @@ private final class RecordingAppLaunchTransport: AppLaunchTransport,
 
 private struct AppLaunchRuntime: CommandSubmissionRuntime {
     let outcome: StandardOutcome
+    var expectedEnvironment: [String: String] = [:]
 
     func submit(
         _ intent: CommandSubmissionIntent
     ) throws -> [CommandSubmissionEvent] {
         XCTAssertEqual(intent.commandID, "app.launch")
-        XCTAssertEqual(intent.rawArguments, ["bundleID": "com.example.App"])
+        var expected = ["bundleID": "com.example.App"]
+        if !expectedEnvironment.isEmpty { expected["environment"] = try LaunchEnvironment.encode(expectedEnvironment) }
+        XCTAssertEqual(intent.rawArguments, expected)
         let terminal = try CommandSubmissionTerminal(
             outcome: outcome,
             commitState: outcome == .succeeded ? .committed : .unknown,
