@@ -284,26 +284,34 @@ public struct POSIXHostPathSystem: Sendable {
         fileSystem: AnchoredFileSystem,
         system: POSIXHostPathSystem
     ) throws -> AnchoredDirectory {
+        let applicationSupport = try ensureApplicationSupportAnchor(
+            inHome: home,
+            fileSystem: fileSystem,
+            system: system
+        )
+        return try Self.ensureDeveloperImageStoreAnchor(
+            in: applicationSupport,
+            fileSystem: fileSystem,
+            owner: system.effectiveUserID
+        )
+    }
+
+    static func ensureApplicationSupportAnchor(
+        inHome home: AnchoredDirectory,
+        fileSystem: AnchoredFileSystem,
+        system: POSIXHostPathSystem
+    ) throws -> AnchoredDirectory {
         let owner = system.effectiveUserID
         let library = try fileSystem.openDirectory(
             named: "Library",
             relativeTo: home,
             expecting: HostNodeExpectation(owner: owner, kind: .directory)
         )
-        try system.createDirectoryIfMissing(
-            named: "Application Support",
-            relativeTo: library.fileDescriptor,
-            mode: 0o700
-        )
-        let applicationSupport = try fileSystem.openDirectory(
+        return try fileSystem.ensureDirectory(
             named: "Application Support",
             relativeTo: library,
-            expecting: HostNodeExpectation(owner: owner, kind: .directory)
-        )
-        return try Self.ensureDeveloperImageStoreAnchor(
-            in: applicationSupport,
-            fileSystem: fileSystem,
-            owner: owner
+            owner: owner,
+            preservingExistingPermissions: true
         )
     }
 
@@ -315,12 +323,14 @@ public struct POSIXHostPathSystem: Sendable {
         let product = try fileSystem.ensureDirectory(
             named: "PulsePhone",
             relativeTo: applicationSupport,
-            owner: owner
+            owner: owner,
+            preservingExistingPermissions: true
         )
         return try fileSystem.ensureDirectory(
             named: "DeveloperImages",
             relativeTo: product,
-            owner: owner
+            owner: owner,
+            preservingExistingPermissions: true
         )
     }
 

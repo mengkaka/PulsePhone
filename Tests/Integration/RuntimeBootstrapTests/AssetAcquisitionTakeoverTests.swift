@@ -9,6 +9,9 @@ final class AssetAcquisitionTakeoverTests: XCTestCase {
     let root = try makeStoreRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let assetKey = String(repeating: "a", count: 64)
+    for directory in [root, root.appendingPathComponent("locks")] {
+      XCTAssertEqual(chmod(directory.path, 0o755), 0)
+    }
     let source = POSIXAssetAcquisitionTakeoverLockSource(storeRootPath: root.path)
     var first: AssetAcquisitionTakeoverLease? = try XCTUnwrap(
       source.tryAcquire(assetKey: assetKey)
@@ -29,6 +32,10 @@ final class AssetAcquisitionTakeoverTests: XCTestCase {
     )
     let acquired = try takeover.acquire(assetKey: assetKey)
     XCTAssertEqual(acquired.assetKey, assetKey)
+    for directory in [root, root.appendingPathComponent("locks")] {
+      let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+      XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o755)
+    }
   }
 
   func testBusyAssetReleasesStoreLockForDisjointTakeover() throws {

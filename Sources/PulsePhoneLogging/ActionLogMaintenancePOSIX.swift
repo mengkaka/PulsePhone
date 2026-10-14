@@ -114,7 +114,7 @@ public struct ProductionActionLogMaintenance: Sendable {
             if errno == ENOENT { return nil }
             throw systemCall("lstat-root")
         }
-        guard Self.isOwnedDirectory(metadata, mode: 0o700) else {
+        guard Self.isOwnedDirectory(metadata) else {
             throw ProductionActionLogMaintenanceError.unsafeHostPath
         }
         let descriptor = Darwin.open(
@@ -134,7 +134,7 @@ public struct ProductionActionLogMaintenance: Sendable {
             throw error
         }
         guard Self.sameIdentity(metadata, opened),
-              Self.isOwnedDirectory(opened, mode: 0o700)
+              Self.isOwnedDirectory(opened)
         else {
             _ = Darwin.close(descriptor)
             throw ProductionActionLogMaintenanceError.unsafeHostPath
@@ -193,7 +193,7 @@ public struct ProductionActionLogMaintenance: Sendable {
             }
             var metadata = stat()
             guard fstat(descriptor, &metadata) == 0,
-                  Self.isOwnedDirectory(metadata, mode: 0o700)
+                  Self.isOwnedDirectory(metadata)
             else {
                 _ = Darwin.close(descriptor)
                 result.append(ScannedTarget(
@@ -469,10 +469,9 @@ public struct ProductionActionLogMaintenance: Sendable {
         .systemCall(operation: operation, errno: errno)
     }
 
-    private static func isOwnedDirectory(_ value: stat, mode: mode_t) -> Bool {
+    private static func isOwnedDirectory(_ value: stat) -> Bool {
         value.st_uid == geteuid()
             && value.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
-            && value.st_mode & mode_t(0o7777) == mode
     }
 
     private static func isOwnedRegularFile(_ value: stat, mode: mode_t) -> Bool {

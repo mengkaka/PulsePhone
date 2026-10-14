@@ -523,7 +523,7 @@ func validatePersonalizedMetadata(file *os.File, owner uint32, directory bool, m
 		return personalizedError("unsafe file metadata")
 	}
 	if directory {
-		if !info.IsDir() || info.Mode().Perm() != 0o700 {
+		if !info.IsDir() {
 			return personalizedError("unsafe directory")
 		}
 		return nil

@@ -151,7 +151,7 @@ final class AnchoredFileSystemTests: XCTestCase {
         }
     }
 
-    func testDeveloperImageStoreRejectsExistingWorldReadableDirectory() throws {
+    func testDeveloperImageStoreReusesExistingProductDirectoryPermissions() throws {
         let fixture = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(atPath: fixture) }
         let fileSystem = AnchoredFileSystem()
@@ -159,24 +159,21 @@ final class AnchoredFileSystemTests: XCTestCase {
             atPath: fixture,
             expecting: HostNodeExpectation(owner: geteuid(), kind: .directory, mode: 0o700)
         )
-        XCTAssertEqual(mkdir(fixture + "/PulsePhone", 0o755), 0)
-        XCTAssertEqual(chmod(fixture + "/PulsePhone", 0o755), 0)
-        XCTAssertThrowsError(
-            try POSIXHostPathSystem.ensureDeveloperImageStoreAnchor(
+        let productPath = fixture + "/PulsePhone"
+        XCTAssertEqual(mkdir(productPath, 0o755), 0)
+        for mode: mode_t in [0o755, 0o775, 0o777] {
+            XCTAssertEqual(chmod(productPath, mode), 0)
+            let store = try POSIXHostPathSystem.ensureDeveloperImageStoreAnchor(
                 in: support,
                 fileSystem: fileSystem,
                 owner: geteuid()
             )
-        ) { error in
-            XCTAssertEqual(
-                error as? AnchoredFileSystemError,
-                .unsafeNode(reason: .wrongMode(expected: 0o700, actual: 0o755))
-            )
+            XCTAssertEqual(permissions(at: productPath), mode)
+            XCTAssertEqual(permissions(at: store.logicalPath), 0o700)
         }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture + "/PulsePhone/DeveloperImages"))
     }
 
-    func testDeveloperImageStoreDoesNotRepairWorldReadableStore() throws {
+    func testDeveloperImageStoreReusesStorePermissionsWithoutChmod() throws {
         let fixture = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(atPath: fixture) }
         let fileSystem = AnchoredFileSystem()
@@ -188,18 +185,13 @@ final class AnchoredFileSystemTests: XCTestCase {
         XCTAssertEqual(mkdir(fixture + "/PulsePhone/DeveloperImages", 0o755), 0)
         XCTAssertEqual(chmod(fixture + "/PulsePhone/DeveloperImages", 0o755), 0)
 
-        XCTAssertThrowsError(
-            try POSIXHostPathSystem.ensureDeveloperImageStoreAnchor(
-                in: support,
-                fileSystem: fileSystem,
-                owner: geteuid()
-            )
-        ) { error in
-            XCTAssertEqual(
-                error as? AnchoredFileSystemError,
-                .unsafeNode(reason: .wrongMode(expected: 0o700, actual: 0o755))
-            )
-        }
+        let first = try POSIXHostPathSystem.ensureDeveloperImageStoreAnchor(
+            in: support, fileSystem: fileSystem, owner: geteuid()
+        )
+        let second = try POSIXHostPathSystem.ensureDeveloperImageStoreAnchor(
+            in: support, fileSystem: fileSystem, owner: geteuid()
+        )
+        XCTAssertEqual(first.identity, second.identity)
         XCTAssertEqual(permissions(at: fixture + "/PulsePhone/DeveloperImages"), 0o755)
     }
 

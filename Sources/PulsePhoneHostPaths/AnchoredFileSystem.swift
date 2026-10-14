@@ -225,11 +225,14 @@ public struct AnchoredFileSystem: Sendable {
         }
     }
 
+    /// Persistent stores can preserve existing directory modes while still
+    /// validating ownership, type, and identity. Creation always uses `mode`.
     public func ensureDirectory(
         named component: String,
         relativeTo parent: AnchoredDirectory,
         owner: uid_t,
-        mode: mode_t = 0o700
+        mode: mode_t = 0o700,
+        preservingExistingPermissions: Bool = false
     ) throws -> AnchoredDirectory {
         try validatePathComponent(component)
         try system.createDirectoryIfMissing(
@@ -243,7 +246,7 @@ public struct AnchoredFileSystem: Sendable {
             expecting: HostNodeExpectation(
                 owner: owner,
                 kind: .directory,
-                mode: mode
+                mode: preservingExistingPermissions ? nil : mode
             )
         )
     }

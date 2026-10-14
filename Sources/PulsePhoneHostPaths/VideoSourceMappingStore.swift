@@ -639,35 +639,22 @@ public final class ProductionVideoSourceMappingStore:
                 kind: .directory
             )
         )
-        let library = try fileSystem.openDirectory(
-            named: "Library",
-            relativeTo: home,
-            expecting: HostNodeExpectation(
-                owner: hostPaths.effectiveUserID,
-                kind: .directory,
-                mode: 0o700
-            )
-        )
-        let applicationSupport = try fileSystem.openDirectory(
-            named: "Application Support",
-            relativeTo: library,
-            expecting: HostNodeExpectation(
-                owner: hostPaths.effectiveUserID,
-                kind: .directory,
-                mode: 0o700
-            )
+        let applicationSupport = try POSIXHostPathSystem.ensureApplicationSupportAnchor(
+            inHome: home,
+            fileSystem: fileSystem,
+            system: system
         )
         let pulsePhone = try fileSystem.ensureDirectory(
             named: "PulsePhone",
             relativeTo: applicationSupport,
             owner: hostPaths.effectiveUserID,
-            mode: 0o700
+            preservingExistingPermissions: true
         )
         let mappings = try fileSystem.ensureDirectory(
             named: "VideoSourceMappings",
             relativeTo: pulsePhone,
             owner: hostPaths.effectiveUserID,
-            mode: 0o700
+            preservingExistingPermissions: true
         )
         var url = URL(fileURLWithPath: mappings.logicalPath, isDirectory: true)
         var values = URLResourceValues()
@@ -678,8 +665,7 @@ public final class ProductionVideoSourceMappingStore:
             relativeTo: pulsePhone,
             expecting: HostNodeExpectation(
                 owner: hostPaths.effectiveUserID,
-                kind: .directory,
-                mode: 0o700
+                kind: .directory
             ),
             identity: mappings.identity
         )

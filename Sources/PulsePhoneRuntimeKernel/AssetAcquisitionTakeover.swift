@@ -49,9 +49,9 @@ public struct POSIXAssetAcquisitionTakeoverLockSource: AssetAcquisitionTakeoverL
     guard StableBytes.isLowercaseHex(assetKey, byteCount: 32) else {
       throw AssetAcquisitionTakeoverError.invalidAssetKey
     }
-    let root = try openDirectory(storeRootPath, expectedMode: 0o700)
+    let root = try openDirectory(storeRootPath)
     defer { Darwin.close(root) }
-    let locks = try openDirectory(named: "locks", relativeTo: root, expectedMode: 0o700)
+    let locks = try openDirectory(named: "locks", relativeTo: root)
     defer { Darwin.close(locks) }
     let store = try openLock(named: "asset-store.lock", relativeTo: locks)
     guard flock(store, LOCK_EX | LOCK_NB) == 0 else {
@@ -100,11 +100,11 @@ public struct POSIXAssetAcquisitionTakeoverLockSource: AssetAcquisitionTakeoverL
     }
   }
 
-  private func openDirectory(_ path: String, expectedMode: mode_t) throws -> Int32 {
+  private func openDirectory(_ path: String) throws -> Int32 {
     let descriptor = Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECTORY)
     guard descriptor >= 0 else { throw systemCall("open-store-root", errno) }
     do {
-      try validate(descriptor, kind: mode_t(S_IFDIR), mode: expectedMode, path: path)
+      try validate(descriptor, kind: mode_t(S_IFDIR), mode: nil, path: path)
       return descriptor
     } catch {
       Darwin.close(descriptor)
@@ -114,8 +114,7 @@ public struct POSIXAssetAcquisitionTakeoverLockSource: AssetAcquisitionTakeoverL
 
   private func openDirectory(
     named component: String,
-    relativeTo parent: Int32,
-    expectedMode: mode_t
+    relativeTo parent: Int32
   ) throws -> Int32 {
     let descriptor = Darwin.openat(
       parent,
@@ -124,7 +123,7 @@ public struct POSIXAssetAcquisitionTakeoverLockSource: AssetAcquisitionTakeoverL
     )
     guard descriptor >= 0 else { throw systemCall("open-locks-directory", errno) }
     do {
-      try validate(descriptor, kind: mode_t(S_IFDIR), mode: expectedMode, path: component)
+      try validate(descriptor, kind: mode_t(S_IFDIR), mode: nil, path: component)
       return descriptor
     } catch {
       Darwin.close(descriptor)
@@ -152,14 +151,14 @@ public struct POSIXAssetAcquisitionTakeoverLockSource: AssetAcquisitionTakeoverL
   private func validate(
     _ descriptor: Int32,
     kind: mode_t,
-    mode: mode_t,
+    mode: mode_t?,
     path: String
   ) throws {
     var status = stat()
     guard fstat(descriptor, &status) == 0 else { throw systemCall("fstat", errno) }
     guard status.st_uid == ownerUID,
       status.st_mode & mode_t(S_IFMT) == kind,
-      status.st_mode & mode_t(0o7777) == mode,
+      mode == nil || status.st_mode & mode_t(0o7777) == mode,
       kind != mode_t(S_IFREG) || status.st_nlink == 1
     else {
       throw AssetAcquisitionTakeoverError.unsafeNode(path)

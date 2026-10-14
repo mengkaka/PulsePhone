@@ -87,6 +87,41 @@ final class VideoSourceMappingStoreTests: XCTestCase {
         )
     }
 
+    func testExistingDirectoryPermissionsSurviveReplaceLoadAndClear() throws {
+        let fixture = try makeStoreFixture()
+        defer { fixture.remove() }
+        let product = fixture.home + "/Library/Application Support/PulsePhone"
+        XCTAssertEqual(mkdir(product, 0o755), 0)
+        XCTAssertEqual(mkdir(fixture.mappingsDirectory, 0o755), 0)
+        let paths = [
+            fixture.home + "/Library", fixture.home + "/Library/Application Support",
+            product, fixture.mappingsDirectory,
+        ]
+        for path in paths { XCTAssertEqual(chmod(path, 0o755), 0) }
+        let target = try canonicalTarget("EXISTING-DIRECTORIES")
+        let record = try fixture.store.replace(target: target, sourceID: firstSourceID)
+        XCTAssertEqual(fixture.store.load(target: target), .mapped(.currentV2(record)))
+        XCTAssertEqual(permissions(at: fixture.path(for: target)), 0o600)
+        XCTAssertTrue(try fixture.store.clear(target: target))
+        for path in paths { XCTAssertEqual(permissions(at: path), 0o755) }
+    }
+
+    func testMissingApplicationSupportIsCreatedBeforeMappingStore() throws {
+        let fixture = try makeStoreFixture()
+        defer { fixture.remove() }
+        try FileManager.default.removeItem(atPath: fixture.home + "/Library/Application Support")
+        let target = try canonicalTarget("FRESH-MAPPING")
+        let record = try fixture.store.replace(target: target, sourceID: firstSourceID)
+        XCTAssertEqual(fixture.store.load(target: target), .mapped(.currentV2(record)))
+        for path in [
+            fixture.home + "/Library/Application Support",
+            fixture.home + "/Library/Application Support/PulsePhone",
+            fixture.mappingsDirectory,
+        ] {
+            XCTAssertEqual(permissions(at: path), 0o700)
+        }
+    }
+
     func testCurrentRecordRoundTripsOptionalPortraitCanvasDimensions() throws {
         let target = try canonicalTarget("TARGET-CANVAS")
         let record = try VideoSourceMappingRecordV2(

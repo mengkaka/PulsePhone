@@ -19,8 +19,7 @@ struct AssetStorePOSIX {
       throw systemCall("lstat-directory", errno)
     }
     guard metadata.st_uid == owner,
-      metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
-      metadata.st_mode & 0o7777 == 0o700
+      metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
     else {
       throw DeveloperImageAssetStoreError.unsafeNode(path)
     }
@@ -32,8 +31,7 @@ struct AssetStorePOSIX {
       throw systemCall("lstat-directory", errno)
     }
     guard metadata.st_uid == owner,
-      metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
-      metadata.st_mode & 0o7777 == 0o700
+      metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
     else {
       throw DeveloperImageAssetStoreError.unsafeNode(path)
     }

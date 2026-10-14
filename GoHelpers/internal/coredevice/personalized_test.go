@@ -102,6 +102,19 @@ func TestPersonalizedCatalogAndAssetLease(t *testing.T) {
 	if reference.ContentManifestSHA256 == "" || len(reference.Files) != 3 {
 		t.Fatalf("unexpected reference: %#v", reference)
 	}
+	var reusedDirectories []string
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			reusedDirectories = append(reusedDirectories, path)
+			return os.Chmod(path, 0o755)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	store, err := NewTrustedPersonalizedImageStore(root)
 	if err != nil {
 		t.Fatal(err)
@@ -126,6 +139,12 @@ func TestPersonalizedCatalogAndAssetLease(t *testing.T) {
 	}
 	if _, err := lease.ReadRole(PersonalizedImage, 1024); err == nil {
 		t.Fatal("closed asset lease remained usable")
+	}
+	for _, directory := range reusedDirectories {
+		info, err := os.Stat(directory)
+		if err != nil || info.Mode().Perm() != 0o755 {
+			t.Fatalf("directory permissions changed: %s, err=%v", directory, err)
+		}
 	}
 }
 

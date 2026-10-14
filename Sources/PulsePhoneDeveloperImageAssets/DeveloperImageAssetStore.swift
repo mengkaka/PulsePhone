@@ -732,7 +732,7 @@ public final class DeveloperImageAssetStore: @unchecked Sendable {
       }
       let kind = metadata.st_mode & mode_t(S_IFMT)
       if kind == mode_t(S_IFDIR) {
-        guard metadata.st_uid == geteuid(), metadata.st_mode & 0o7777 == 0o700 else {
+        guard metadata.st_uid == geteuid() else {
           throw DeveloperImageAssetStoreError.unsafeNode(url.path)
         }
         continue

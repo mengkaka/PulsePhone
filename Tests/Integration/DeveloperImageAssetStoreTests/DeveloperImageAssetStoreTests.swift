@@ -115,6 +115,43 @@ final class DeveloperImageAssetStoreTests: XCTestCase {
     XCTAssertEqual(expected.expectedAssetCount, 1)
   }
 
+  func testExistingDirectoryPermissionsSurviveAssetLifecycle() throws {
+    let parent = try temporaryDirectory()
+    let root = parent.appendingPathComponent("DeveloperImages")
+    XCTAssertEqual(mkdir(root.path, 0o755), 0)
+    for component in ["catalogs", "assets", "downloads", "locks", "state"] {
+      XCTAssertEqual(mkdir(root.appendingPathComponent(component).path, 0o755), 0)
+    }
+    let store = try DeveloperImageAssetStore(rootURL: root)
+    XCTAssertEqual(try mode(of: root.appendingPathComponent("state/preparation-rehydration").path), 0o700)
+    let entry = EntrySpec(
+      entryID: "classic.existing-directories",
+      image: Data("existing-image".utf8), signature: Data("existing-signature".utf8)
+    )
+    let catalog = try makeCatalog(revision: "existing-directories.v1", entries: [entry])
+    let asset = try store.publish(
+      catalog: catalog, entryID: entry.entryID, archiveEntries: entry.archiveEntries
+    )
+    var directories = [root]
+    let enumerator = try XCTUnwrap(FileManager.default.enumerator(
+      at: root, includingPropertiesForKeys: [.isDirectoryKey]
+    ))
+    for case let url as URL in enumerator {
+      if try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true {
+        directories.append(url)
+      }
+    }
+    for directory in directories { XCTAssertEqual(chmod(directory.path, 0o755), 0) }
+    let reopened = try DeveloperImageAssetStore(rootURL: root)
+    XCTAssertNotNil(try reopened.openVerifiedAsset(catalog: catalog, entryID: entry.entryID))
+    XCTAssertGreaterThan(try reopened.accounting().assetBytes, 0)
+    _ = try reopened.rebuildIndex()
+    for directory in directories { XCTAssertEqual(try mode(of: directory.path), 0o755) }
+    XCTAssertEqual(try reopened.prune(to: 0, activeAssetKeys: [], requiredAssetKeys: []), [asset.assetKey])
+    XCTAssertEqual(try mode(of: root.path), 0o755)
+    XCTAssertEqual(try mode(of: root.appendingPathComponent("locks/asset-store.lock").path), 0o600)
+  }
+
   func testStoreRootSecurityAndAccounting() throws {
     let fixture = try requirementFixture("T-019/store-root-security-accounting-l2")
     let expected = try fixture.decodeExpected(CommonExpected.self)

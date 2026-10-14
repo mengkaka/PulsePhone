@@ -27,6 +27,8 @@ The installer downloads `PulsePhone-macos-arm64.zip` and its `.sha256` file from
 
 The installer adds `~/.local/bin` to the current user's zsh or bash profile when needed, without `sudo`. For bash it updates the first existing login profile (`.bash_profile`, `.bash_login`, or `.profile`) and `.bashrc`, preserving which login profile bash reads. It reports download and verification progress, the installed app and command paths, and whether each shell profile was updated or already configured. New terminals pick up the setting automatically. Because the installer runs in a child shell, when the current terminal lacks that directory on `PATH` it prints a single `export PATH=...` command to run for immediate use. Unknown shells or unsafe profile paths are left unchanged with a manual instruction that distinguishes a successful app installation from incomplete PATH configuration.
 
+PulsePhone creates missing data directories under `~/Library/Application Support/PulsePhone` with mode `0700`. Existing directories, including manually created `0755` directories at any depth, are reused without changing their permissions. Ownership, directory type, and symlink checks still apply; file and lock permissions remain `0600`.
+
 For inspection before execution, download the script and read it locally before passing it to `/bin/bash`.
 
 ### Agent Skill

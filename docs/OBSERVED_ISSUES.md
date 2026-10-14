@@ -61,7 +61,7 @@
 | `OBS-034` | Developer Support preparation 未接入生产单飞与 remediation 合同 | High | `resolved` | build 22 iOS 26.5.2 fresh-generation rehydration、Live preflight 与 cleanup 已闭环 |
 | `OBS-035` | `type --text` 第二次调用复用已关闭的 Pasteboard 会话 | High | `resolved` | `f2071f0` 修复；iOS 26.5.2 连续实体输入通过，无粘贴权限弹窗 |
 | `OBS-036` | 高位 ECID 被 Lockdown 整数解析拒绝，导致 iOS 17+ prepare 误报 Developer Support 不可用 | High | `investigating` | 高位 `UniqueChipID` unsigned parsing；等待 packaged candidate 验证 |
-| `OBS-038` | 新用户目录下Runtime启动被Developer Image store目录初始化阻断 | High | `investigating` | 首次创建/0700/no-follow回归通过；等待主线构建环境修复及fresh packaged验证 |
+| `OBS-038` | 新用户目录下Runtime启动被Developer Image store目录初始化阻断 | High | `investigating` | 首次创建、已有目录权限兼容及no-follow回归通过；等待主线构建环境修复及fresh packaged验证 |
 
 ## OBS-001：关闭已绑定视频的 live 窗口时 GUIHost 崩溃
 
@@ -1642,5 +1642,8 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 - `swift build --target PulsePhoneRuntimeExecutable`通过。结构校验、Python tooling校验、Go依赖/生成校验、Go测试及两个Go Helper构建通过。
 - 独立复核同批安装器PATH修改：安装成功后从JSON result取得launcher路径，为zsh/bash幂等配置未来终端，并对当前终端仅输出`export PATH=...`。补修Bash直接新建`.bash_profile`会遮蔽既有`.bash_login`/`.profile`的问题；现按Bash优先级更新既有login profile。安装器13项测试及全部tooling Python 25项测试通过；PRD、TRD 06和README同步最终行为，清除旧版“安装脚本不写profile”的矛盾描述。
 - 用户随后确认安装输出范式，合同提交`b345c76`：安装器按阶段显示下载、checksum、签名/Gatekeeper及安装结果，列出App/launcher路径，逐profile说明已更新或配置已存在；PATH未配置完成时明确保留App已安装结果。成功时不混入下载进度与系统校验原始诊断，失败时保留校验诊断并退出。既有安装器回归补充实际文件结果断言，全部tooling Python仍为25项通过；结构及Python tooling校验通过。本次仅调整安装输出，没有修改产品目录权限策略，也没有重跑正式安装包安装流程；先前fresh packaged关闭条件不变。
+- 用户随后明确并授权统一目录复用原则，合同提交`7574bca`，替代此前持久目录0755 fail-closed要求：PulsePhone及全部下级持久目录保留已有mode，缺失时按0700创建；owner/type/no-follow、identity和文件/lock 0600要求继续保留。HostPaths显式启用持久目录权限兼容，Runtime临时base保持精确mode；VideoSourceMappings复用Application Support父目录初始化；Developer Image store和内部目录、容量统计、下载接管、classic/personalized Go Helper及ActionLogs的目录mode检查同步调整。Configuration原本兼容，新增回归确认不chmod。
+- 本次使用临时SwiftPM包加载仓库原样生产源码，并复制原样测试与Fixtures，避开未改动GUI编译阻塞：HostPaths 35项、Developer Image assets 28项、Logging 31项、下载接管及其现有recovery支持测试7项，共101项通过、0失败。覆盖产品父目录0755/0775/0777复用、缺失子目录0700、多层资产目录0755下publish/read/accounting/rebuild/prune、mapping replace/load/clear、Configuration保存、日志prune/clear、flock接管，以及既有symlink/owner/type/identity和文件权限拒绝。初次临时包缺少共享测试helper，补入仓库原样VerifiedProcessRecoveryTests后完整模块回归通过；未修改产品来绕过测试。
+- 本次`swift build --target PulsePhoneRuntimeExecutable`、Go全量测试、两个Go Helper构建、结构/Python tooling/Go依赖与生成校验通过。当前候选再次运行`make build`仍在未改动的`ProductionSampleBufferDisplay.swift:68`遇到Swift 6.4 data-race编译错误；`make check`仍在doctor的Go 1.26.2精确版本检查处停止。未将模块结果视为完整Gate或packaged通过，未合入main或发布。
 - 当前完整验证仍未通过：`make check`在doctor处因仓库锁定Go 1.26.2、当前Go 1.26.8而停止；`make build`与仓库内`swift test --filter AnchoredFileSystemTests`在未改动的`ProductionSampleBufferDisplay.swift:68`遇到Xcode 27并发检查错误，尚未运行到整包测试。没有将临时验证包的结果描述为整包通过。
 - 唯一下一动作：在满足仓库工具链要求且主线GUI可构建的环境完成`make check`与正式packaging，再在没有预建PulsePhone产品目录的可信新用户环境运行packaged `apps --json`并确认成功；全部关闭标准满足前保留`investigating`。本分支尚未合入main或发布。

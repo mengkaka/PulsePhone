@@ -116,6 +116,20 @@ func TestClassicReferenceAndAssetLeaseVerifyCanonicalHashes(t *testing.T) {
 	writeSecureTestFile(t, filepath.Join(assetRoot, "roles", classicImageRole), image)
 	writeSecureTestFile(t, filepath.Join(assetRoot, "roles", classicSignatureRole), signature)
 
+	var reusedDirectories []string
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			reusedDirectories = append(reusedDirectories, path)
+			return os.Chmod(path, 0o755)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	reference, err := loadClassicReference(revision, catalogCanonicalSHA256, contentManifestSHA256)
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +154,13 @@ func TestClassicReferenceAndAssetLeaseVerifyCanonicalHashes(t *testing.T) {
 		t.Fatalf("signature=%q err=%v", gotSignature, err)
 	}
 	lease.Close()
+
+	for _, directory := range reusedDirectories {
+		info, err := os.Stat(directory)
+		if err != nil || info.Mode().Perm() != 0o755 {
+			t.Fatalf("directory permissions changed: %s, err=%v", directory, err)
+		}
+	}
 
 	roles := filepath.Join(assetRoot, "roles")
 	if err := os.Rename(roles, filepath.Join(assetRoot, "roles-original")); err != nil {

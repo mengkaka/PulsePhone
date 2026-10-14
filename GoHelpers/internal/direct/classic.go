@@ -683,7 +683,7 @@ func validateSecureFileOwnedBy(file *os.File, exact int64, lock bool, owner uint
 
 func validateClassicDirectoryInfo(info os.FileInfo, owner uint32) error {
 	statInfo, ok := classicStat(info)
-	if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 || statInfo.Uid != owner {
+	if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || statInfo.Uid != owner {
 		return errors.New("directory metadata")
 	}
 	return nil

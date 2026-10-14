@@ -203,6 +203,10 @@ final class ActionLogMaintenanceTests: XCTestCase {
         let fresh = "actions-20260720T000000Z-00000000-0000-0000-0000-000000000002.jsonl"
         try makeTarget(root: root, target: targetA, files: [old, fresh])
         try makeTarget(root: root, target: targetB, files: [fresh])
+        let directories = [root] + [targetA, targetB].map {
+            root.appendingPathComponent($0.domainSeparatedHash)
+        }
+        for directory in directories { XCTAssertEqual(chmod(directory.path, 0o755), 0) }
         try setModificationDate(
             now - 8 * 24 * 60 * 60,
             for: root.appendingPathComponent(targetA.domainSeparatedHash)
@@ -230,6 +234,10 @@ final class ActionLogMaintenanceTests: XCTestCase {
 
         let clear = try maintenance.clearAll()
         XCTAssertEqual(clear.deletedFileCount, 2)
+        for directory in directories {
+            let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+            XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o755)
+        }
         for target in [targetA, targetB] {
             let directory = root.appendingPathComponent(target.domainSeparatedHash)
             XCTAssertTrue(FileManager.default.fileExists(
