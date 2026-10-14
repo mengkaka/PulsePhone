@@ -1641,5 +1641,6 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 - 在当前Xcode 27 / Swift 6.4环境中，以仅包含仓库原样`PulsePhoneSharedDefinitions`、`PulsePhoneHostPaths`源码及HostPath测试/fixture的临时SwiftPM包运行测试：32项通过，0失败。包含首次创建、缺失Application Support、重复初始化、拒绝既有0755，以及新增的产品目录/存储目录symlink拒绝且不写入外部目标。此结果是模块回归，不替代production packaged验收。
 - `swift build --target PulsePhoneRuntimeExecutable`通过。结构校验、Python tooling校验、Go依赖/生成校验、Go测试及两个Go Helper构建通过。
 - 独立复核同批安装器PATH修改：安装成功后从JSON result取得launcher路径，为zsh/bash幂等配置未来终端，并对当前终端仅输出`export PATH=...`。补修Bash直接新建`.bash_profile`会遮蔽既有`.bash_login`/`.profile`的问题；现按Bash优先级更新既有login profile。安装器13项测试及全部tooling Python 25项测试通过；PRD、TRD 06和README同步最终行为，清除旧版“安装脚本不写profile”的矛盾描述。
+- 用户随后确认安装输出范式，合同提交`b345c76`：安装器按阶段显示下载、checksum、签名/Gatekeeper及安装结果，列出App/launcher路径，逐profile说明已更新或配置已存在；PATH未配置完成时明确保留App已安装结果。成功时不混入下载进度与系统校验原始诊断，失败时保留校验诊断并退出。既有安装器回归补充实际文件结果断言，全部tooling Python仍为25项通过；结构及Python tooling校验通过。本次仅调整安装输出，没有修改产品目录权限策略，也没有重跑正式安装包安装流程；先前fresh packaged关闭条件不变。
 - 当前完整验证仍未通过：`make check`在doctor处因仓库锁定Go 1.26.2、当前Go 1.26.8而停止；`make build`与仓库内`swift test --filter AnchoredFileSystemTests`在未改动的`ProductionSampleBufferDisplay.swift:68`遇到Xcode 27并发检查错误，尚未运行到整包测试。没有将临时验证包的结果描述为整包通过。
 - 唯一下一动作：在满足仓库工具链要求且主线GUI可构建的环境完成`make check`与正式packaging，再在没有预建PulsePhone产品目录的可信新用户环境运行packaged `apps --json`并确认成功；全部关闭标准满足前保留`investigating`。本分支尚未合入main或发布。

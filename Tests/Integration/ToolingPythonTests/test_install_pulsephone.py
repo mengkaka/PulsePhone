@@ -76,10 +76,20 @@ class InstallPulsePhoneScriptTests(unittest.TestCase):
             launcher.symlink_to("/usr/bin/true")
             zdotdir = home / "zsh-settings"
             zdotdir.mkdir()
-            for _ in range(2):
+            for attempt in range(2):
                 output = self.configure_path(home, "/bin/zsh", zdotdir=zdotdir)
                 self.assertIn('export PATH="$HOME/.local/bin:$PATH"', output)
-                self.assertIn("future terminals", output)
+                self.assertIn("New terminals will load this setting automatically.", output)
+                self.assertIn("Shell: zsh", output)
+                self.assertIn("PulsePhone --help", output)
+                if attempt == 0:
+                    self.assertIn(f"Updated {zdotdir / '.zshrc'}:", output)
+                else:
+                    self.assertIn(
+                        f"PATH configuration already exists in {zdotdir / '.zshrc'}.",
+                        output,
+                    )
+                    self.assertIn("No changes needed.", output)
             profile = (zdotdir / ".zshrc").read_text(encoding="utf-8")
             self.assertEqual(profile.count('export PATH="$HOME/.local/bin:$PATH"'), 1)
             self.assertEqual((zdotdir / ".zshrc").stat().st_mode & 0o777, 0o600)
@@ -98,9 +108,17 @@ class InstallPulsePhoneScriptTests(unittest.TestCase):
             launcher = home / ".local/bin/PulsePhone"
             launcher.parent.mkdir(parents=True)
             launcher.symlink_to("/usr/bin/true")
-            for _ in range(2):
+            for attempt in range(2):
                 output = self.configure_path(home, "/bin/bash")
-                self.assertIn("future terminals", output)
+                self.assertIn("New terminals will load this setting automatically.", output)
+                self.assertIn("Shell: bash", output)
+                for filename in [".bash_profile", ".bashrc"]:
+                    message = (
+                        f"Updated {home / filename}:"
+                        if attempt == 0
+                        else f"PATH configuration already exists in {home / filename}."
+                    )
+                    self.assertIn(message, output)
             for filename in [".bash_profile", ".bashrc"]:
                 profile = (home / filename).read_text(encoding="utf-8")
                 self.assertEqual(profile.count('export PATH="$HOME/.local/bin:$PATH"'), 1)
@@ -129,6 +147,10 @@ class InstallPulsePhoneScriptTests(unittest.TestCase):
             (home / ".zshrc").symlink_to(external)
             guidance = self.configure_path(home, "/bin/zsh")
             self.assertIn("Cannot safely update", guidance)
+            self.assertIn(str(home / ".zshrc"), guidance)
+            self.assertIn("PulsePhone is installed, but PATH configuration was not completed", guidance)
+            self.assertIn(str(home / ".local/bin/PulsePhone"), guidance)
+            self.assertNotIn("New terminals will load", guidance)
             self.assertNotIn("export PATH", guidance)
             self.assertEqual(external.read_text(encoding="utf-8"), "unchanged\n")
 
@@ -184,7 +206,9 @@ class InstallPulsePhoneScriptTests(unittest.TestCase):
             line = 'export PATH="$HOME/.local/bin:$PATH"'
             (home / ".bash_profile").write_text(line + "\n", encoding="utf-8")
             output = self.configure_path(home, "/bin/bash")
-            self.assertIn("future terminals", output)
+            self.assertIn("New terminals will load this setting automatically.", output)
+            self.assertIn(f"PATH configuration already exists in {home / '.bash_profile'}.", output)
+            self.assertIn(f"Updated {home / '.bashrc'}:", output)
             self.assertEqual((home / ".bash_profile").read_text(), line + "\n")
             self.assertEqual((home / ".bashrc").read_text().count(line), 1)
 
@@ -213,8 +237,8 @@ class InstallPulsePhoneScriptTests(unittest.TestCase):
             output = self.configure_path(
                 home, "/bin/zsh", path=f"/usr/bin:{directory}:/bin"
             )
-            self.assertIn("future terminals", output)
-            self.assertNotIn("To use it in this terminal", output)
+            self.assertIn("New terminals will load this setting automatically.", output)
+            self.assertNotIn("To use PulsePhone in this terminal", output)
             self.assertEqual(
                 (home / ".zshrc").read_text().count(
                     'export PATH="$HOME/.local/bin:$PATH"'
