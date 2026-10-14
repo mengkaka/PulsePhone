@@ -26,7 +26,9 @@ const (
 	afcMakeDir     uint64 = 0x09
 	afcGetFileInfo uint64 = 0x0a
 
-	afcReadError uint64 = 4
+	afcReadError      uint64 = 4
+	afcObjectNotFound uint64 = 8
+	afcObjectExists   uint64 = 16
 )
 
 type AFCError struct {
@@ -69,7 +71,8 @@ func (c *AFCClient) Exists(path string) (bool, error) {
 	operation, _, err := c.call(afcGetFileInfo, append([]byte(path), 0), "stat")
 	if err != nil {
 		var afcError *AFCError
-		if errors.As(err, &afcError) && afcError.Status == afcReadError {
+		// Devices report missing paths as either READ_ERROR or OBJECT_NOT_FOUND.
+		if errors.As(err, &afcError) && (afcError.Status == afcReadError || afcError.Status == afcObjectNotFound) {
 			return false, nil
 		}
 		return false, err
@@ -87,22 +90,12 @@ func (c *AFCClient) MakeDir(path string) error {
 	operation, payload, err := c.call(afcMakeDir, append([]byte(path), 0), "mkdir")
 	if err != nil {
 		var afcError *AFCError
-		if errors.As(err, &afcError) && afcError.Status == 16 {
+		if errors.As(err, &afcError) && afcError.Status == afcObjectExists {
 			return nil
 		}
 		return err
 	}
-	if operation == afcStatus {
-		status, err := statusValue(payload)
-		if err != nil {
-			return err
-		}
-		if status == 16 { // object already exists
-			return nil
-		}
-		return &AFCError{Operation: "mkdir", Status: status}
-	}
-	return errors.New("invalid afc mkdir response")
+	return c.requireStatus(operation, payload, "mkdir")
 }
 
 func (c *AFCClient) Remove(path string) error {

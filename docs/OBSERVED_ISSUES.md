@@ -62,7 +62,7 @@
 | `OBS-035` | `type --text` 第二次调用复用已关闭的 Pasteboard 会话 | High | `resolved` | `f2071f0` 修复；iOS 26.5.2 连续实体输入通过，无粘贴权限弹窗 |
 | `OBS-036` | 高位 ECID 被 Lockdown 整数解析拒绝，导致 iOS 17+ prepare 误报 Developer Support 不可用 | High | `investigating` | 高位 `UniqueChipID` unsigned parsing；等待 packaged candidate 验证 |
 | `OBS-038` | 新用户目录下Runtime启动被Developer Image store目录初始化阻断 | High | `investigating` | 目录回归、完整构建和make check通过；等待fresh-user packaged验证 |
-| `OBS-039` | iOS 26.6 安装签名测试 IPA 在 AFC staging 初始化阶段失败 | Medium | `open` | build 5 返回 installFailed/notCommitted/afcOpen；需区分 Exists 与 MakeDir 根因 |
+| `OBS-039` | iOS 26.6 安装签名测试 IPA 在 AFC staging 初始化阶段失败 | Medium | `investigating` | 已确认未处理missing状态8、mkdir成功0被误报；在main修复并验证签名IPA |
 
 ## OBS-001：关闭已绑定视频的 live 窗口时 GUIHost 崩溃
 
@@ -1674,11 +1674,17 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 
 ## OBS-039：iOS 26.6 安装签名测试 IPA 在 AFC staging 初始化阶段失败
 
-- 状态：`open`
+- 状态：`investigating`
 - 发现日期：2026-10-14
 - 严重度：Medium
 - 合同：TRD 06 §25 app.install 的 AFC staging、InstallationProxy 提交与 typed failure；DV-013 IPA oracle。
 - 实体证据：源码`d43d309`的development 0.2.2 build 5，经全局launcher向boya-iPhone / iOS 26.6 (`23G71`)安装用户授权的`com.pulsephone.validation.launchenv`签名IPA。返回exit 6、`installFailed`、`commitState=notCommitted`、`stage=afcOpen`，未自动重试。IPA SHA-256=`4065a459e426ca51649967df89582e7d5c171547898b5a58696e0c6d77c56350`。同一签名.app经Apple devicectl安装成功，后续PulsePhone launch和uninstall均成功。
-- 根因尚未确认：`GoHelpers/internal/direct/apps.go`将`Exists(/PublicStaging/PulsePhone)`错误和`MakeDir`错误都映射为`afcOpen`，现有envelope无法区分两者；不能据此宣称一定是父目录缺失、签名失败或安装服务提交失败。此次只观察到一次，不宣称可重复复现。
+- 初始envelope未包含底层状态：`GoHelpers/internal/direct/apps.go`将`Exists(/PublicStaging/PulsePhone)`错误和`MakeDir`错误都映射为`afcOpen`；后续只读生产代码诊断已确认根因，见下方checkpoint。
 - 证据：`build/observations/local-validation-20261014/`中的`env-probe-install.json`、`env-probe-devicectl-install.json`、`env-probe/probe.json`与cleanup记录。测试App已卸载，应用列表确认不存在，不遗留设备内容。
-- 下一动作：在独立安装修复任务中区分AFC Exists/MakeDir失败原因，确认设备侧staging目录状态，按合同修复并以同类受控签名IPA重验公开安装与清理；本轮本机功能验收不扩大为安装模块修复。
+
+### 2026-10-14 根因确认与修复计划
+
+- 用户明确要求直接在`main`修复，覆盖本任务默认feature worktree流程。原生产代码只读查询同一boya-iPhone：`/PublicStaging`存在，`/PublicStaging/PulsePhone`返回`AFCError(stat, 8)`；`Exists`仅把4视为missing，导致8直接映射为`afcOpen`。另外向原生产`MakeDir`注入标准成功响应0，得到`AFCError(mkdir, 0)`，确认第二处独立缺陷。没有向设备发送mkdir或重复安装来完成此定位。
+- 修复计划：Exists兼容missing状态4和8；MakeDir接受成功0和既有16，其他错误仍保留失败语义；补充真实AFC framing回归和权限/协议负例，运行Go与完整Gate，在新development包中验证缺staging目录首次安装和已有目录复用，测试后卸载并停止Runtime。现有TRD要求安装可用，本修复不改变公开合同。
+- 生产AFC framing回归在旧代码上准确失败于missing状态8和mkdir成功0两行；修复后Exists的7个场景、MakeDir的6个场景全部通过，覆盖4/8、0/16和权限/I/O/畸形响应拒绝。生产修复仅增加两种missing状态兼容，并让mkdir正常响应使用已有`requireStatus`校验；未增加自动重试、修改安装路由或放宽其他错误。证据：`build/observations/afc-install-fix-20261014/regression-before.log`、`regression-after.log`。
+- 唯一下一动作：完成`make check`，从干净源码组装development candidate，验证公开入口缺目录安装/已有目录复用和卸载清理；全部完成前保留`investigating`。

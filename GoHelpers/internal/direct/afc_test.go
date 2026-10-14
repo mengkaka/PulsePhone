@@ -3,6 +3,7 @@ package direct
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -88,7 +89,7 @@ func TestAFCClientUsesExpectedPacketFraming(t *testing.T) {
 	}
 }
 
-func TestAFCClientExistsMatchesPythonReadErrorSemantics(t *testing.T) {
+func TestAFCClientExistsHandlesMissingAndFailureReplies(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		operation uint64
@@ -97,7 +98,12 @@ func TestAFCClientExistsMatchesPythonReadErrorSemantics(t *testing.T) {
 		wantError bool
 	}{
 		{name: "existing", operation: afcData, payload: []byte("st_ifmt\x00S_IFDIR\x00"), want: true},
-		{name: "missing", operation: afcStatus, payload: uint64Payload(afcReadError), want: false},
+		{name: "missing read error", operation: afcStatus, payload: uint64Payload(4), want: false},
+		{name: "missing object not found", operation: afcStatus, payload: uint64Payload(8), want: false},
+		{name: "permission denied", operation: afcStatus, payload: uint64Payload(10), wantError: true},
+		{name: "IO error", operation: afcStatus, payload: uint64Payload(20), wantError: true},
+		{name: "invalid response operation", operation: afcFileOpenRes, payload: uint64Payload(41), wantError: true},
+		{name: "malformed status", operation: afcStatus, payload: []byte{0}, wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			clientConn, serverConn := net.Pipe()
@@ -133,12 +139,76 @@ func TestAFCClientExistsMatchesPythonReadErrorSemantics(t *testing.T) {
 				serverError <- err
 			}()
 			client := NewAFCClient(clientConn, time.Now().Add(time.Second))
+			defer client.Close()
 			got, err := client.Exists("/PublicStaging/PulsePhone")
 			if (err != nil) != test.wantError || got != test.want {
 				t.Fatalf("Exists() = %t, %v", got, err)
 			}
 			if err := <-serverError; err != nil {
 				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAFCClientMakeDirHandlesStatusReplies(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		operation  uint64
+		payload    []byte
+		wantError  bool
+		wantStatus uint64
+	}{
+		{name: "created", operation: afcStatus, payload: uint64Payload(0)},
+		{name: "already exists", operation: afcStatus, payload: uint64Payload(16)},
+		{name: "permission denied", operation: afcStatus, payload: uint64Payload(10), wantError: true, wantStatus: 10},
+		{name: "IO error", operation: afcStatus, payload: uint64Payload(20), wantError: true, wantStatus: 20},
+		{name: "invalid response operation", operation: afcData, wantError: true},
+		{name: "malformed status", operation: afcStatus, payload: []byte{0}, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clientConn, serverConn := net.Pipe()
+			defer serverConn.Close()
+			client := NewAFCClient(clientConn, time.Now().Add(time.Second))
+			defer client.Close()
+			serverError := make(chan error, 1)
+			go func() {
+				header := make([]byte, afcHeaderBytes)
+				if _, err := io.ReadFull(serverConn, header); err != nil {
+					serverError <- err
+					return
+				}
+				length := binary.LittleEndian.Uint64(header[8:16])
+				payload := make([]byte, int(length)-afcHeaderBytes)
+				if _, err := io.ReadFull(serverConn, payload); err != nil {
+					serverError <- err
+					return
+				}
+				if binary.LittleEndian.Uint64(header[32:40]) != afcMakeDir || string(payload) != "/PublicStaging/PulsePhone\x00" {
+					serverError <- errors.New("unexpected AFC mkdir request")
+					return
+				}
+				response := make([]byte, afcHeaderBytes)
+				copy(response[:8], afcMagic)
+				binary.LittleEndian.PutUint64(response[8:16], uint64(afcHeaderBytes+len(test.payload)))
+				binary.LittleEndian.PutUint64(response[16:24], uint64(afcHeaderBytes+len(test.payload)))
+				copy(response[24:32], header[24:32])
+				binary.LittleEndian.PutUint64(response[32:40], test.operation)
+				_, err := serverConn.Write(append(response, test.payload...))
+				serverError <- err
+			}()
+			err := client.MakeDir("/PublicStaging/PulsePhone")
+			if serverErr := <-serverError; serverErr != nil {
+				t.Fatal(serverErr)
+			}
+			if (err != nil) != test.wantError {
+				t.Fatalf("MakeDir() = %v, wantError %t", err, test.wantError)
+			}
+			if test.wantStatus != 0 {
+				var afcErr *AFCError
+				if !errors.As(err, &afcErr) || afcErr.Operation != "mkdir" || afcErr.Status != test.wantStatus {
+					t.Fatalf("MakeDir() lost AFC failure: %v", err)
+				}
 			}
 		})
 	}
