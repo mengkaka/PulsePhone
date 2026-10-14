@@ -409,7 +409,6 @@ video record start/stop
 live --debug-device-picker
 orientation get/set
 stop --force
-.app install
 GUI launch / GUI uninstall
 Touch status toolbar item
 ```
