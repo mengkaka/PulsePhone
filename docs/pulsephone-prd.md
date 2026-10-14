@@ -540,7 +540,7 @@ PulsePhone text input-source next [--udid <UDID>]
 ```sh
 PulsePhone install --path <app.ipa> [--udid <UDID>]
 PulsePhone uninstall --bundle-id <bundleID> [--udid <UDID>]
-PulsePhone launch --bundle-id <bundleID> [--udid <UDID>]
+PulsePhone launch --bundle-id <bundleID> [--env KEY=VALUE ...] [--udid <UDID>]
 PulsePhone apps [--udid <UDID>]
 ```
 
@@ -549,6 +549,8 @@ PulsePhone apps [--udid <UDID>]
 - install 只接受 `.ipa`，不自动 launch。
 - install/uninstall 使用 classic installation service，iOS 14～16 与 iOS 17+ 共用同一产品语义。
 - launch 在 iOS 17+ 使用 CoreDevice AppService；iOS 14～16 仅在 approved Developer Support + DVT 可用时开放。
+- `launch --env KEY=VALUE`可重复，向本次启动的iPhone App进程传入环境变量，不继承Mac进程环境。按首个`=`拆分，允许空值、空格、Unicode和包含`=`的值；同名变量以最后一次为准。变量名须匹配`[A-Za-z_][A-Za-z0-9_]*`且不超过128 UTF-8字节，最多64个变量，最终名字和值的UTF-8字节总和不超过8192，值不能包含NUL；无参数时行为不变。
+- launch沿用先终止已有App进程再启动的策略，使本次环境生效；不保证App保持前台或持续运行。普通日志、成功结果和错误消息不得回显变量值。
 - CLI 发起时把相对路径解析为绝对标准路径；Runtime 不依赖调用方 cwd。
 - IPA 内容采用 execution-time path semantics，不 copy、spool 或 fingerprint。
 - install 一旦 accepted，不因 CLI 超时、CLI 退出或 live 窗口关闭自动取消。

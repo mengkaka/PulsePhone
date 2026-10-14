@@ -206,6 +206,10 @@ legacy developer
 
 install/uninstall/launch 两两串行，但 shared app-state 允许与不冲突的 pointer、keyboard、screenshot 并发。DirectHelper process slot 和更早 waiter 仍可限制实际并发。
 
+`app.launch`独用`appLaunch.v1`参数schema，包含required `bundleID`和optional `environment`；uninstall继续使用`bundleID.v1`。CLI把可重复`--env KEY=VALUE`按首个等号拆分、同名最后一次覆盖，校验PRD的名字、数量、8192-byte总量与NUL限制后，把最终map编码为repository canonical JSON字符串放入`environment`，维持现有`[String:String]`提交协议。Runtime admission重新校验该字符串（encoded上限65536字节），拒绝重复JSON key、非string值、未知参数与非法环境；Helper payload将其解码为optional `environment`对象。缺省不添加该字段，两条Helper均默认空map且在访问设备服务前独立校验同样的限制。
+
+DVT把map传入`launchSuspendedProcessWithDevicePath:bundleIdentifier:environment:arguments:options:`的environment参数，保留`KillExisting=true`；CoreDevice将map放入`launchapplication.options.environmentVariables`，保留`terminateExisting=true`。不合并Mac环境。成功结果仍只有bundle ID、disposition与既有route元数据；普通日志、错误消息与结果不包含环境值。测试须覆盖CLI归一化、Runtime payload投影、两条Helper真实协议入参及非法输入在设备访问前失败；实机生效须另用读取进程environment的受控App验证，模块测试不能替代该验收。
+
 `app.install` 的 production Runtime在planning前对规范化execution-time `ipaPath`执行no-follow普通文件preflight；失败返回`invalidIPAPath`且不启动Helper。backend payload固定为`operation=install`和通过preflight的路径；Helper payload、日志和terminal不得回显该路径。DirectHelper必须再次以no-follow方式打开同一路径并验证为非空普通文件，以有界ZIP/Info.plist读取确认单一`Payload/*.app`和合法`CFBundleIdentifier`，不得先把整份IPA读入内存。Helper侧文件竞态、无效归档或bundle metadata返回`invalidIPA/notCommitted`。
 
 DirectHelper在同一target-bound Lockdown lease中打开 AFC 和 InstallationProxy。IPA上传到本次request唯一的 `/PublicStaging/PulsePhone` remote file，每次host read和AFC write均不得超过1 MiB；AFC handle关闭后才提交一次 InstallationProxy `Install`，只有backend `Status=Complete`才返回 `bundleID + disposition=installed`。remote staging file、AFC、InstallationProxy和Lockdown lease必须在terminal前best-effort清理；不删除或改写host源IPA，不自动launch，不rollback已提交安装。Install request提交前的service/upload失败返回`installFailed/notCommitted`；提交后明确backend拒绝返回`installFailed/committed`；提交后transport loss或30分钟absolute deadline耗尽返回`outcomeUnknown/unknown`。Client、Runtime和Helper不得用通用60秒socket/helper等待提前截断该30分钟deadline。
