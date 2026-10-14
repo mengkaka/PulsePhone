@@ -1914,7 +1914,9 @@ public struct PulsePhoneCLIProcess: Sendable {
         details: [String: String]? = nil
     ) throws -> CLITerminalOutput {
         let renderedMessage: String?
-        if code == "capabilityPreparing",
+        if code == "invalidIPA", details?["stage"] == "appPlatform" {
+            renderedMessage = "The .app must be an arm64 iPhoneOS device build. Simulator and macOS apps cannot be installed on an iPhone."
+        } else if code == "capabilityPreparing",
            details?["remediation"] == "runDevicePrepare"
         {
             let reason = details?["reason"]

@@ -511,6 +511,27 @@ final class ArgumentPreflightDispatcherTests: XCTestCase {
         }
     }
 
+    func testInstallPlatformFailureExplainsDeviceBuildRequirement() throws {
+        let process = PulsePhoneCLIProcess(
+            makeStaticSurface: Self.staticSurface,
+            makeQueries: { LocalDeviceQueries(snapshot: try Self.snapshot()) },
+            makeActionLogMaintenance: Self.missingActionLogMaintenance,
+            runtimeRequest: { _, _, _, _, _ in
+                try Self.failedRuntimeResult(code: "invalidIPA", details: ["stage": "appPlatform", "commitState": "notCommitted"])
+            }
+        )
+        let arguments = ["install", "--path", "/tmp/Simulator.app", "--udid", "AAAA"]
+        let human = process.run(arguments: arguments)
+        XCTAssertEqual(human.exitCode, 6)
+        XCTAssertTrue(human.chunk.stderr[0].contains("iPhoneOS"))
+        XCTAssertTrue(human.chunk.stderr[0].contains("Simulator and macOS"))
+        let jsonOutput = process.run(arguments: arguments + ["--json"])
+        let envelope = try XCTUnwrap(try json(jsonOutput.chunk.stdout[0]))
+        let error = try XCTUnwrap(envelope["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "invalidIPA")
+        XCTAssertEqual((error["details"] as? [String: Any])?["stage"] as? String, "appPlatform")
+    }
+
     func testRuntimeFixedDecimalResultIsEmittedAsPlainJSONNumber() throws {
         let decimal = try RepositoryJSONDecimal("0.000000001")
         let process = PulsePhoneCLIProcess(
