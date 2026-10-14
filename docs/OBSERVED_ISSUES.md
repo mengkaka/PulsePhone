@@ -62,7 +62,7 @@
 | `OBS-035` | `type --text` 第二次调用复用已关闭的 Pasteboard 会话 | High | `resolved` | `f2071f0` 修复；iOS 26.5.2 连续实体输入通过，无粘贴权限弹窗 |
 | `OBS-036` | 高位 ECID 被 Lockdown 整数解析拒绝，导致 iOS 17+ prepare 误报 Developer Support 不可用 | High | `investigating` | 高位 `UniqueChipID` unsigned parsing；等待 packaged candidate 验证 |
 | `OBS-038` | 新用户目录下Runtime启动被Developer Image store目录初始化阻断 | High | `investigating` | 目录回归、完整构建和make check通过；等待fresh-user packaged验证 |
-| `OBS-039` | iOS 26.6 安装签名测试 IPA 在 AFC staging 初始化阶段失败 | Medium | `investigating` | 已确认未处理missing状态8、mkdir成功0被误报；在main修复并验证签名IPA |
+| `OBS-039` | iOS 26.6 安装签名测试 IPA 在 AFC staging 初始化阶段失败 | Medium | `resolved` | `e7ef4ac`修复AFC状态4/8与0/16；build 7缺目录及已有目录安装/卸载真机通过 |
 
 ## OBS-001：关闭已绑定视频的 live 窗口时 GUIHost 崩溃
 
@@ -1674,17 +1674,13 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 
 ## OBS-039：iOS 26.6 安装签名测试 IPA 在 AFC staging 初始化阶段失败
 
-- 状态：`investigating`
+- 状态：`resolved`（2026-10-14）
 - 发现日期：2026-10-14
 - 严重度：Medium
 - 合同：TRD 06 §25 app.install 的 AFC staging、InstallationProxy 提交与 typed failure；DV-013 IPA oracle。
-- 实体证据：源码`d43d309`的development 0.2.2 build 5，经全局launcher向boya-iPhone / iOS 26.6 (`23G71`)安装用户授权的`com.pulsephone.validation.launchenv`签名IPA。返回exit 6、`installFailed`、`commitState=notCommitted`、`stage=afcOpen`，未自动重试。IPA SHA-256=`4065a459e426ca51649967df89582e7d5c171547898b5a58696e0c6d77c56350`。同一签名.app经Apple devicectl安装成功，后续PulsePhone launch和uninstall均成功。
-- 初始envelope未包含底层状态：`GoHelpers/internal/direct/apps.go`将`Exists(/PublicStaging/PulsePhone)`错误和`MakeDir`错误都映射为`afcOpen`；后续只读生产代码诊断已确认根因，见下方checkpoint。
-- 证据：`build/observations/local-validation-20261014/`中的`env-probe-install.json`、`env-probe-devicectl-install.json`、`env-probe/probe.json`与cleanup记录。测试App已卸载，应用列表确认不存在，不遗留设备内容。
-
-### 2026-10-14 根因确认与修复计划
-
-- 用户明确要求直接在`main`修复，覆盖本任务默认feature worktree流程。原生产代码只读查询同一boya-iPhone：`/PublicStaging`存在，`/PublicStaging/PulsePhone`返回`AFCError(stat, 8)`；`Exists`仅把4视为missing，导致8直接映射为`afcOpen`。另外向原生产`MakeDir`注入标准成功响应0，得到`AFCError(mkdir, 0)`，确认第二处独立缺陷。没有向设备发送mkdir或重复安装来完成此定位。
-- 修复计划：Exists兼容missing状态4和8；MakeDir接受成功0和既有16，其他错误仍保留失败语义；补充真实AFC framing回归和权限/协议负例，运行Go与完整Gate，在新development包中验证缺staging目录首次安装和已有目录复用，测试后卸载并停止Runtime。现有TRD要求安装可用，本修复不改变公开合同。
-- 生产AFC framing回归在旧代码上准确失败于missing状态8和mkdir成功0两行；修复后Exists的7个场景、MakeDir的6个场景全部通过，覆盖4/8、0/16和权限/I/O/畸形响应拒绝。生产修复仅增加两种missing状态兼容，并让mkdir正常响应使用已有`requireStatus`校验；未增加自动重试、修改安装路由或放宽其他错误。证据：`build/observations/afc-install-fix-20261014/regression-before.log`、`regression-after.log`。
-- 唯一下一动作：完成`make check`，从干净源码组装development candidate，验证公开入口缺目录安装/已有目录复用和卸载清理；全部完成前保留`investigating`。
+- 根因：boya-iPhone / iOS 26.6 (`23G71`)缺少`/PublicStaging/PulsePhone`时，原生产`Exists`将AFC missing状态8误报失败；原`MakeDir`另将成功状态0误报失败。原始build 5返回`installFailed/notCommitted/afcOpen`，发生在上传和安装提交之前。只读原生产代码诊断及framing回归分别确认这两处缺陷，不属于IPA签名校验失败。
+- 修复：用户明确要求直接在`main`实施，源码提交`e7ef4ac`。Exists接受missing状态4/8；MakeDir用既有`requireStatus`接受成功0，继续兼容已存在16，保留其他错误。13个真实AFC framing场景覆盖正常/缺失/已有以及权限、I/O、畸形响应；旧代码准确失败于8/0，修复后全部通过。没有增加自动重试或改变安装路由/公开schema。
+- 完整Gate：干净源码`e7ef4ac`的`make check`通过，包括Go全量、两个Helper构建、完整build、Swift 1096项（5项按既有条件跳过、零失败）、Python registry 7项、生成及current合同校验。此前908统计未包含188项带skip摘要的RuntimeBootstrap suite；本次按各binary的All tests摘要完整统计，不把skip计为通过。
+- 精确实体闭环：干净源码`e7ef4ac`组装development 0.2.2 build 7并安装本机，CLI/Runtime/两个Helper哈希与candidate一致。全局`PulsePhone install`在同一设备完成缺staging目录首次安装、已有目录复用安装两行，均返回`installed`且`apps`确认bundle存在；每次PulsePhone卸载成功，`apps`确认不存在，AFC只读查询确认staging目录为空。测试IPA为此前已授权ENV Probe，bundle=`com.pulsephone.validation.launchenv`，SHA-256=`4065a459e426ca51649967df89582e7d5c171547898b5a58696e0c6d77c56350`，未使用Apple工具代替修复后的安装oracle。
+- 清理：测试App已卸载，Runtime最终`notRunning`；设备保留产品正常创建的空staging目录。本机保留修复后的build 7，前一build 5及build 1备份仍在既有证据中。未发布正式分发包；其他OS/正式candidate完整矩阵仍由DV-013管理。
+- 证据：`build/observations/afc-install-fix-20261014/`（回归前后、完整check、candidate、两次install/browse/uninstall、AFC目录和cleanup）；candidate input hash=`eedb95853b08401cd691ac580f101f197b462c6d1234121461b71c7d821f37cc`，manifest位于`build/evidence/afc-install-fix-20261014/a2ad884232a71a851a411deb718604b3de768d9782adac880402158f64be989f/release-candidate-input.v1.json`。首次额外package调用仅因objects root不在规定的`build/evidence`下而退出，改正路径后完整重跑成功；不修改产品绕过guard。
