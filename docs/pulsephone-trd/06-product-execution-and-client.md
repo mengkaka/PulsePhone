@@ -1172,3 +1172,14 @@ Ack stopping/alreadyStopping
 ```
 
 第一阶段无 force stop。
+
+### app.launch 连接失效与结果分类
+
+CoreDevice appControl 随 generation 首次准备创建，健康连接串行复用。失效时仅移除并关闭 appControl；下一次按需通过当前 RSD 创建，原 tunnel 和其他 facet 保留。替换须同步更新 generation 资源所有权，并检查 runtime/connection/executor identity；detach/retire 后不得装回旧连接。无后台保活或无限重连。
+
+- 原 deadline 内，能够证明尚未开始发送的连接错误允许最多一次重建；过期请求不发送。
+- 发送已开始后的 write/read 错误、超时或畸形响应均返回 `outcomeUnknown`、`commitState=unknown`，移除连接，不重放 launch。不凭 write 返回零字节推断未发送。
+- 显式 `CoreDevice.error` 是已知拒绝：标准错误 domain/code 通过现有 `backendStage.v1.normalizedBackendCode` 传递，不返回原始 userInfo、环境变量或描述。`NSOSStatusErrorDomain:-10814` 映射 `appNotInstalled`，未识别拒绝返回 `appLaunchFailed`；不能猜测设备锁定码。
+- 服务创建失败返回 `developerServicesUnavailable/notCommitted`，连接失效不单独触发整个 helper/generation 退出。共享 tunnel 的既有生命周期失败处理继续适用。
+
+回归必须覆盖握手/响应不影响发送编号、连续请求、局部重建、同一 deadline、发送后不重试、明确拒绝与隐私、替换资源关闭以及 retire/reopen 竞争；旧 DTX 路由保持原编号。

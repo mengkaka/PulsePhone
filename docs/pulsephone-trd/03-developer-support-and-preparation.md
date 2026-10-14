@@ -570,3 +570,9 @@ candidate/BaseImage-build 不兼容。网络、暂时 TSS 故障或 committed mo
 `deviceDisconnected`。
 
 target mismatch、Helper framing corruption、duplicate generation和无法cleanup/fence属于Runtime fatal fail-stop。
+
+### RemoteXPC 请求编号约束
+
+客户端普通请求使用独立发送序列 `1,3,5,...`，接收消息（包括握手消息）不得覆盖发送序列。握手/control 的编号 `0` 不计入普通请求序列；序列耗尽时拒绝发送，不得回绕。此约束适用于共享 RemoteXPC 实现及 iOS 17+ CoreDevice 路由；iOS 14–16 DVT/DTX 的递增编号独立保留。
+
+依据：[Frida 16.3.0 实现](https://github.com/frida/frida-core/blob/16.3.0/src/fruity/xpc.vala)、[pymobiledevice3 修复 283b621](https://github.com/doronz88/pymobiledevice3/commit/283b621ac0ff0a81d14d8100562900c7517ffab0)。Frida 16.3.0 已支持 iOS 17/17.5.1，上游修复说明含 iOS 27.2 验证；本项目 iOS 26.6 实测偶数请求后 FIN/EOF、奇数序列连续成功。这不是 Apple 公开规范，也不表示已实测所有 OS 的错误表现。

@@ -1507,7 +1507,7 @@ ReplayTrace 用于显式记录可诊断、可人工分析的语义执行序列�
 已经提交或无法判断 -> outcomeUnknown / exit 7
 ```
 
-PulsePhone 第一阶段不自动重试 mutating command。
+PulsePhone 第一阶段不自动重试已开始发送的 mutating command。`app.launch` 可在原请求 deadline 内，对能够证明尚未开始发送的失效 appControl 连接最多重建一次；发送已开始或无法确定时不得重放，返回 `outcomeUnknown` 并移除失效连接。设备明确拒绝属于已知失败，不因业务拒绝重建健康连接。
 
 静态Help只声明兼容边界，不替代执行期权威判断。`unsupportedOSVersion`继续属于`targetCompatibility`、exit 3，但human/JSON错误必须在有界typed details内说明command要求和当前目标OS，例如：
 

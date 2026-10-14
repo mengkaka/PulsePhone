@@ -62,6 +62,7 @@
 | `OBS-035` | `type --text` 第二次调用复用已关闭的 Pasteboard 会话 | High | `resolved` | `f2071f0` 修复；iOS 26.5.2 连续实体输入通过，无粘贴权限弹窗 |
 | `OBS-036` | 高位 ECID 被 Lockdown 整数解析拒绝，导致 iOS 17+ prepare 误报 Developer Support 不可用 | High | `investigating` | 高位 `UniqueChipID` unsigned parsing；等待 packaged candidate 验证 |
 | `OBS-038` | 新用户目录下Runtime启动被Developer Image store目录初始化阻断 | High | `investigating` | 目录回归、完整构建和make check通过；等待fresh-user packaged验证 |
+| `OBS-040` | 连续 launch 的 RemoteXPC 编号及失效 appControl 缓存导致 EOF | High | `investigating` | 修复奇数发送序列、局部恢复与失败分类；待回归及打包真机验证 |
 | `OBS-039` | iOS 26.6 安装签名测试 IPA 在 AFC staging 初始化阶段失败 | Medium | `resolved` | `e7ef4ac`修复AFC状态4/8与0/16；build 7缺目录及已有目录安装/卸载真机通过 |
 
 ## OBS-001：关闭已绑定视频的 live 窗口时 GUIHost 崩溃
@@ -1684,3 +1685,12 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 - 精确实体闭环：干净源码`e7ef4ac`组装development 0.2.2 build 7并安装本机，CLI/Runtime/两个Helper哈希与candidate一致。全局`PulsePhone install`在同一设备完成缺staging目录首次安装、已有目录复用安装两行，均返回`installed`且`apps`确认bundle存在；每次PulsePhone卸载成功，`apps`确认不存在，AFC只读查询确认staging目录为空。测试IPA为此前已授权ENV Probe，bundle=`com.pulsephone.validation.launchenv`，SHA-256=`4065a459e426ca51649967df89582e7d5c171547898b5a58696e0c6d77c56350`，未使用Apple工具代替修复后的安装oracle。
 - 清理：测试App已卸载，Runtime最终`notRunning`；设备保留产品正常创建的空staging目录。本机保留修复后的build 7，前一build 5及build 1备份仍在既有证据中。未发布正式分发包；其他OS/正式candidate完整矩阵仍由DV-013管理。
 - 证据：`build/observations/afc-install-fix-20261014/`（回归前后、完整check、candidate、两次install/browse/uninstall、AFC目录和cleanup）；candidate input hash=`eedb95853b08401cd691ac580f101f197b462c6d1234121461b71c7d821f37cc`，manifest位于`build/evidence/afc-install-fix-20261014/a2ad884232a71a851a411deb718604b3de768d9782adac880402158f64be989f/release-candidate-input.v1.json`。首次额外package调用仅因objects root不在规定的`build/evidence`下而退出，改正路径后完整重跑成功；不修改产品绕过guard。
+
+## OBS-040：连续 launch 的 RemoteXPC 编号与连接失效恢复
+
+- 状态：`investigating`（2026-10-14）；严重度：High。owner 授权直接在 main 修复三个维度并补回归。
+- 合同：PRD mutating retry 边界；TRD 03 RemoteXPC 请求编号；TRD 06 app.launch 连接失效与结果分类。
+- 根因：发送 ID 被接收消息覆盖且普通请求按 +1 递增，原连接实测 1,1,2 后设备 FIN/EOF。只移除覆盖得到 1,2 仍失败；独立奇数序列同一连接连续 8 次成功。原 launch 将所有错误折叠 appLaunchFailed 且继续缓存失效连接。没有证据断言设备守护进程崩溃。
+- 计划：先合同；实现独立奇数序列、串行 appControl 局部失效/按需替换与资源 ownership CAS、发送边界/显式拒绝分类；focused/race/全量 check/build；development packaged 真机连续 launch 与不存在 bundle 的明确拒绝；关闭前记录精确产物/证据。
+- 诊断证据：`build/observations/remotexpc-launch-fix-20261014/`；旧 iOS 14–16 使用 DTX，无同类编号缺陷，实体旧系统未重测，不扩大版本验收。
+- 唯一下一动作：实施并运行回归。
