@@ -62,6 +62,7 @@
 | `OBS-035` | `type --text` 第二次调用复用已关闭的 Pasteboard 会话 | High | `resolved` | `f2071f0` 修复；iOS 26.5.2 连续实体输入通过，无粘贴权限弹窗 |
 | `OBS-036` | 高位 ECID 被 Lockdown 整数解析拒绝，导致 iOS 17+ prepare 误报 Developer Support 不可用 | High | `investigating` | 高位 `UniqueChipID` unsigned parsing；等待 packaged candidate 验证 |
 | `OBS-038` | 新用户目录下Runtime启动被Developer Image store目录初始化阻断 | High | `investigating` | 目录回归、完整构建和make check通过；等待fresh-user packaged验证 |
+| `OBS-039` | iOS 26.6 安装签名测试 IPA 在 AFC staging 初始化阶段失败 | Medium | `open` | build 5 返回 installFailed/notCommitted/afcOpen；需区分 Exists 与 MakeDir 根因 |
 
 ## OBS-001：关闭已绑定视频的 live 窗口时 GUIHost 崩溃
 
@@ -1661,3 +1662,23 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 - 干净提交`da29daa`上重跑整套Swift测试，既有Wire/README问题已通过，仅两个packaging入口失败：Xcode 27默认swiftbuild引擎与既有Release `-no-whole-module-optimization`/`-num-threads 1`参数组合产生缺失`*-primary.d`。同参数在native引擎的SharedDefinitions Release probe通过；packaging编译和bin-path查询均显式选择native，不改变优化级别、安全检查或产物规范，后续需用完整package回归确认。
 - 干净源码提交`d43d309`完整`make check`最终通过：908项Swift测试零失败、Go全量、生成文件校验、7项Python registry及current合同校验通过；另行26项Python tooling与37项focused Swift通过。两个实际development package冷构建、44项公开CLI入口smoke和性能证据收集的可审计unknown测试均通过，后者不是实体性能通过声明。包内实际`launch --help`也确认`--env`完整描述；development App及candidate/测试证据保存到主工作区的同名observations目录，不作为正式分发版。
 - 证据目录：`build/observations/build-toolchain-20261014/`（build/check、初始失败定位、focused/Python/self-test及debug/packaged launch help日志；`development/PulsePhone.app`与`objects/`为开发验证产物）。下一动作：生成正式candidate并在没有预建PulsePhone产品目录的新用户环境完成packaged验收；OBS保持`investigating`，`launch --env`实机状态仍为`DV-013/notTested`。
+
+### 2026-10-14 本机安装与实体功能验收
+
+- 使用源码`d43d309`的development App（0.2.2 build 5，ad hoc签名），经`self install`更新本机App；CLI、Runtime及两个Helper的SHA-256与源包一致。旧build 1保留本地备份。证据：`build/observations/local-validation-20261014/acceptance.json`及同目录README。
+- 先停止Runtime并原子移走本用户既有PulsePhone数据目录，再通过全局launcher运行真实`apps`：产品父目录完全缺失时成功，PulsePhone和DeveloperImages由产品创建为0700；预建产品根、DeveloperImages、Configuration及manifests为0755时同样成功，全部mode保持0755。每次停止Runtime后恢复原数据根，dev/inode/mode一致。此结果只覆盖同一Mac/同一用户的缺目录模拟，不替代全新Mac/新用户正式candidate验收，OBS继续`investigating`。
+- 对安装器真实`configure_path`函数使用隔离home和真实zsh/bash交互shell：zsh写`.zshrc`，bash更新既有`.profile`和`.bashrc`且不新建遮蔽它的`.bash_profile`；重复执行不重复写行，输出明确列出文件，shell均找到build 5。没有改写用户真实profile，也未执行完整下载/签名/Gatekeeper安装流水线。本机Go 1.26.8 doctor通过。
+- boya-iPhone / iOS 26.6 (`23G71`) 的`device prepare`返回`alreadyReady/alreadyMounted`，不代表冷下载通过。受控ENV Probe在真实App进程中验证`launch --env`覆盖、空值、中文、等号、不继承Mac变量、连续重启与无env对照通过，细节归`DV-013`。Live生产窗口显示测试画面并随进程切换更新，确认renderer实际显示功能；不扩大为性能矩阵通过。
+- 独立发现`app.install`在`afcOpen`失败，归`OBS-039`；经Apple devicectl部署同一测试App后独立完成launch验收。测试结束由PulsePhone成功卸载，`apps`确认bundle缺失，关闭本轮Live窗口并停止Runtime，最终`notRunning`。本机保留build 5，旧用户数据已恢复；Live正常使用可能更新视频源映射。
+- 唯一下一动作：在可信全新Mac/新用户环境使用正式candidate验证缺产品目录的首次冷启动；本轮不发布、不关闭OBS-038。
+
+## OBS-039：iOS 26.6 安装签名测试 IPA 在 AFC staging 初始化阶段失败
+
+- 状态：`open`
+- 发现日期：2026-10-14
+- 严重度：Medium
+- 合同：TRD 06 §25 app.install 的 AFC staging、InstallationProxy 提交与 typed failure；DV-013 IPA oracle。
+- 实体证据：源码`d43d309`的development 0.2.2 build 5，经全局launcher向boya-iPhone / iOS 26.6 (`23G71`)安装用户授权的`com.pulsephone.validation.launchenv`签名IPA。返回exit 6、`installFailed`、`commitState=notCommitted`、`stage=afcOpen`，未自动重试。IPA SHA-256=`4065a459e426ca51649967df89582e7d5c171547898b5a58696e0c6d77c56350`。同一签名.app经Apple devicectl安装成功，后续PulsePhone launch和uninstall均成功。
+- 根因尚未确认：`GoHelpers/internal/direct/apps.go`将`Exists(/PublicStaging/PulsePhone)`错误和`MakeDir`错误都映射为`afcOpen`，现有envelope无法区分两者；不能据此宣称一定是父目录缺失、签名失败或安装服务提交失败。此次只观察到一次，不宣称可重复复现。
+- 证据：`build/observations/local-validation-20261014/`中的`env-probe-install.json`、`env-probe-devicectl-install.json`、`env-probe/probe.json`与cleanup记录。测试App已卸载，应用列表确认不存在，不遗留设备内容。
+- 下一动作：在独立安装修复任务中区分AFC Exists/MakeDir失败原因，确认设备侧staging目录状态，按合同修复并以同类受控签名IPA重验公开安装与清理；本轮本机功能验收不扩大为安装模块修复。
