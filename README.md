@@ -50,7 +50,7 @@ PulsePhone install --path /absolute/path/App.ipa --udid UDID
 PulsePhone install --path /absolute/Build/Products/Debug-iphoneos/App.app --udid UDID
 ```
 
-Use a signed iPhoneOS device build provisioned for the target iPhone. Simulator and macOS .app bundles are rejected. PulsePhone temporarily packages .app contents into an IPA, preserves signed bytes, executable permissions and internal relative symlinks, and removes the temporary archive after the operation. It does not re-sign or modify the source app. The generated archive must be smaller than 4 GiB and the source tree may contain at most 65,532 nodes. The Live GUI Install App picker and drop target accept both formats.
+Use a signed iPhoneOS device build provisioned for the target iPhone. Simulator and macOS .app bundles are rejected. PulsePhone temporarily packages .app contents into an IPA, preserves signed bytes, executable permissions and internal relative symlinks, and removes the temporary archive after the operation. It does not re-sign or modify the source app. The generated archive must be smaller than 4 GiB and the source tree may contain at most 65,532 nodes. In the Live GUI, use the Install App picker or drag a single IPA file or app bundle anywhere in the window, including the toolbar and bottom controls. A blue border marks an accepted drop; release to install on that window's iPhone. Moving out or cancelling the drag does not install anything.
 
 ## OmniParser
 

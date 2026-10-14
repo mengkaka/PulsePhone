@@ -195,8 +195,8 @@ final class ProductionGUIHostAssemblyTests: XCTestCase {
             willBeInsertedIntoToolbar: true
         ))
         let button = try XCTUnwrap(item.view as? NSButton)
-        XCTAssertTrue(button is ProductionIPAInstallButton)
-        XCTAssertTrue(button.registeredDraggedTypes.contains(.fileURL))
+        XCTAssertFalse(button.registeredDraggedTypes.contains(.fileURL))
+        XCTAssertTrue(window is ProductionLiveInstallWindow)
         let sourceControls = try XCTUnwrap(descendant(
             in: try XCTUnwrap(window.contentView),
             identifier: ProductionGUIHostViewIdentifier.sourceControls
@@ -229,13 +229,37 @@ final class ProductionGUIHostAssemblyTests: XCTestCase {
         }
         XCTAssertEqual(session.submissions.filter { $0.commandID == "app.install" }.count, 2)
 
+        let installWindow = try XCTUnwrap(window as? ProductionLiveInstallWindow)
+        let appDrag = InstallDropDraggingInfo(window: window, urls: [app], sequence: 100)
+        XCTAssertEqual(installWindow.draggingEntered(appDrag), .copy)
+        XCTAssertTrue(installWindow.isInstallDropHighlighted)
+        XCTAssertEqual(session.submissions.filter { $0.commandID == "app.install" }.count, 2)
+        XCTAssertTrue(installWindow.performDragOperation(appDrag))
+        XCTAssertFalse(installWindow.performDragOperation(appDrag))
+        try await waitUntil {
+            session.submissions.filter { $0.commandID == "app.install" }.count == 3
+                && status.stringValue == "Installed com.example.Fixture"
+        }
+        XCTAssertEqual(session.submissions.last?.arguments, ["ipaPath": app.path])
+        XCTAssertFalse(installWindow.isInstallDropHighlighted)
+
         session.simulateTransportFailure()
         await fulfillment(of: [closed], timeout: 3)
         try await waitUntil { status.stringValue.hasPrefix("Reconnecting controls") }
         button.performClick(nil)
         XCTAssertEqual(status.stringValue, "runtimeNotRunning")
 
+        let offlineDrag = InstallDropDraggingInfo(window: window, urls: [ipa], sequence: 101)
+        XCTAssertEqual(installWindow.draggingEntered(offlineDrag), .copy)
+        XCTAssertTrue(installWindow.performDragOperation(offlineDrag))
+        XCTAssertEqual(status.stringValue, "runtimeNotRunning")
+        XCTAssertEqual(session.submissions.filter { $0.commandID == "app.install" }.count, 3)
+        let closingDrag = InstallDropDraggingInfo(window: window, urls: [ipa], sequence: 102)
+        XCTAssertEqual(installWindow.draggingEntered(closingDrag), .copy)
         XCTAssertFalse(controller.windowShouldClose(window))
+        XCTAssertFalse(installWindow.isInstallDropHighlighted)
+        XCTAssertEqual(installWindow.draggingUpdated(closingDrag), [])
+        XCTAssertFalse(installWindow.performDragOperation(closingDrag))
         controller.stopMonitoring()
     }
 

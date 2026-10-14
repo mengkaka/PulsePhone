@@ -525,7 +525,7 @@ public final class ProductionGUIHostWindowController:
             identityPlaceholder: identity,
             screenVisibleFrame: Self.liveRect(visibleFrame)
         )
-        let window = NSWindow(
+        let window = ProductionLiveInstallWindow(
             contentRect: NSRect(
                 x: 0,
                 y: 0,
@@ -773,6 +773,13 @@ public final class ProductionGUIHostWindowController:
             window: window
         )
         windows[identifier] = state
+        window.acceptsInstallDrop = { [weak state] in
+            state?.closeLifecycle.acceptsWork == true
+        }
+        window.acceptedDrop = { [weak self, weak state] parameter in
+            guard let self, let state, state.closeLifecycle.acceptsWork else { return }
+            self.submitAcceptedIPA(parameter, in: state)
+        }
         refreshAvailabilityOverlay(in: state)
         setStatus("Connecting controls", busy: true, in: state)
         bindInteractionHandlers(to: state)
@@ -790,6 +797,7 @@ public final class ProductionGUIHostWindowController:
 
     @MainActor
     public func windowShouldClose(_ sender: NSWindow) -> Bool {
+        (sender as? ProductionLiveInstallWindow)?.clearInstallDropHighlight()
         guard let identifier = sender.identifier?.rawValue,
               let state = windows[identifier]
         else { return true }
@@ -2821,33 +2829,11 @@ public final class ProductionGUIHostWindowController:
                 $0.commandID == commandID
             }) else { return nil }
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            let button: NSButton
-            if commandID == "app.install" {
-                let installButton = ProductionIPAInstallButton(
-                    image: Self.toolbarImage(commandID),
-                    target: self,
-                    action: #selector(toolbarAction(_:))
-                )
-                installButton.acceptedDrop = { [weak self, weak state] parameter in
-                    guard let self, let state, state.closeLifecycle.acceptsWork else {
-                        return
-                    }
-                    self.submitAcceptedIPA(parameter, in: state)
-                }
-                installButton.invalidDrop = { [weak self, weak state] in
-                    guard let self, let state, state.closeLifecycle.acceptsWork else {
-                        return
-                    }
-                    self.setStatus("invalidIPAPath", busy: false, in: state)
-                }
-                button = installButton
-            } else {
-                button = NSButton(
-                    image: Self.toolbarImage(commandID),
-                    target: self,
-                    action: #selector(toolbarAction(_:))
-                )
-            }
+            let button = NSButton(
+                image: Self.toolbarImage(commandID),
+                target: self,
+                action: #selector(toolbarAction(_:))
+            )
             button.identifier = NSUserInterfaceItemIdentifier(itemIdentifier.rawValue)
             button.bezelStyle = .texturedRounded
             button.imagePosition = .imageOnly
