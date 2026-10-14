@@ -1646,4 +1646,9 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 - 本次使用临时SwiftPM包加载仓库原样生产源码，并复制原样测试与Fixtures，避开未改动GUI编译阻塞：HostPaths 35项、Developer Image assets 28项、Logging 31项、下载接管及其现有recovery支持测试7项，共101项通过、0失败。覆盖产品父目录0755/0775/0777复用、缺失子目录0700、多层资产目录0755下publish/read/accounting/rebuild/prune、mapping replace/load/clear、Configuration保存、日志prune/clear、flock接管，以及既有symlink/owner/type/identity和文件权限拒绝。初次临时包缺少共享测试helper，补入仓库原样VerifiedProcessRecoveryTests后完整模块回归通过；未修改产品来绕过测试。
 - 本次`swift build --target PulsePhoneRuntimeExecutable`、Go全量测试、两个Go Helper构建、结构/Python tooling/Go依赖与生成校验通过。当前候选再次运行`make build`仍在未改动的`ProductionSampleBufferDisplay.swift:68`遇到Swift 6.4 data-race编译错误；`make check`仍在doctor的Go 1.26.2精确版本检查处停止。未将模块结果视为完整Gate或packaged通过，未合入main或发布。
 - 当前完整验证仍未通过：`make check`在doctor处因仓库锁定Go 1.26.2、当前Go 1.26.8而停止；`make build`与仓库内`swift test --filter AnchoredFileSystemTests`在未改动的`ProductionSampleBufferDisplay.swift:68`遇到Xcode 27并发检查错误，尚未运行到整包测试。没有将临时验证包的结果描述为整包通过。
-- 唯一下一动作：在满足仓库工具链要求且主线GUI可构建的环境完成`make check`与正式packaging，再在没有预建PulsePhone产品目录的可信新用户环境运行packaged `apps --json`并确认成功；全部关闭标准满足前保留`investigating`。本分支尚未合入main或发布。
+- 唯一下一动作：在满足仓库工具链要求且主线GUI可构建的环境完成`make check`与正式packaging，再在没有预建PulsePhone产品目录的可信新用户环境运行packaged `apps --json`并确认成功；全部关闭标准满足前保留`investigating`。修复已于2026-10-14快进合入公开`main`（源码`9fa73a9`），尚未发布。
+
+### 2026-10-14 main集成复核
+
+- 按owner授权，将`codex/first-install-fixes`的7个提交快进合入`main`（`b8361bb -> 9fa73a9`），包括首次启动目录初始化/已有目录权限兼容、安装器PATH与输出、`launch --env`。`PulsePhone-first-install-fixes`工作区已删除，6份验证日志已校验复制到主工作区的`build/observations/launch-environment-20261014/`；其他工作区保持原状。
+- 在`PulsePhone-public`的合并后`main`上复跑`make build`，仍在`ProductionSampleBufferDisplay.swift:68`遇到`displaySample`并发隔离编译错误；`make check`仍因doctor要求Go 1.26.2、本机Go 1.26.8而停止。日志位于`build/observations/first-install-main-integration-20261014/`。本checkpoint没有更新可发布App产物，也未执行fresh-user packaged或`launch --env`实机验收；OBS继续保持`investigating`，下一动作仍为解决既有构建/工具链阻塞后完成正式candidate与新用户验收。
