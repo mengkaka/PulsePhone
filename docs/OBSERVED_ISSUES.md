@@ -61,7 +61,7 @@
 | `OBS-034` | Developer Support preparation 未接入生产单飞与 remediation 合同 | High | `resolved` | build 22 iOS 26.5.2 fresh-generation rehydration、Live preflight 与 cleanup 已闭环 |
 | `OBS-035` | `type --text` 第二次调用复用已关闭的 Pasteboard 会话 | High | `resolved` | `f2071f0` 修复；iOS 26.5.2 连续实体输入通过，无粘贴权限弹窗 |
 | `OBS-036` | 高位 ECID 被 Lockdown 整数解析拒绝，导致 iOS 17+ prepare 误报 Developer Support 不可用 | High | `investigating` | 高位 `UniqueChipID` unsigned parsing；等待 packaged candidate 验证 |
-| `OBS-038` | 新用户目录下Runtime启动被Developer Image store目录初始化阻断 | High | `investigating` | 目录回归和完整构建通过；等待完整Gate及fresh packaged验证 |
+| `OBS-038` | 新用户目录下Runtime启动被Developer Image store目录初始化阻断 | High | `investigating` | 目录回归、完整构建和make check通过；等待fresh-user packaged验证 |
 
 ## OBS-001：关闭已绑定视频的 live 窗口时 GUIHost 崩溃
 
@@ -1659,4 +1659,5 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 - Go doctor改为接受稳定版`1.26.x`，保留go.mod的1.26.2推荐基线和`GOTOOLCHAIN=local`。通过实际doctor执行验证1.26.0/2/8/10接受，1.25、1.27、rc、devel和错误分隔符拒绝；当前Go 1.26.8通过。完整`make build`和26项Python tooling测试通过。首轮完整`make check`暴露既有Wire断言漏列已实现的`capabilityResults`、README生成模板未同步此前安装器/目录/launch及OmniParser文字的问题，已按既有schema与README校准断言、模板及README hash fixture；另有两个packaging调用因未提交工作区被clean-tree guard拒绝，必须提交后重跑，不绕过该guard。
 - 新构建debug executable放在仅含Registries/Schemas的临时App路径执行`launch --help`，确认包含`--env <KEY=VALUE>...`、重复覆盖/空值/限制说明及示例；README、PRD、TRD和既有CLI help断言均已覆盖。本smoke不属于正式packaged验收。
 - 干净提交`da29daa`上重跑整套Swift测试，既有Wire/README问题已通过，仅两个packaging入口失败：Xcode 27默认swiftbuild引擎与既有Release `-no-whole-module-optimization`/`-num-threads 1`参数组合产生缺失`*-primary.d`。同参数在native引擎的SharedDefinitions Release probe通过；packaging编译和bin-path查询均显式选择native，不改变优化级别、安全检查或产物规范，后续需用完整package回归确认。
-- 证据目录：`build/observations/build-toolchain-20261014/`（build/check、Python tooling及launch help日志）。下一动作：完成完整Gate，再生成正式candidate并在没有预建PulsePhone产品目录的新用户环境完成packaged验收；OBS保持`investigating`，`launch --env`实机状态仍为`DV-013/notTested`。
+- 干净源码提交`d43d309`完整`make check`最终通过：908项Swift测试零失败、Go全量、生成文件校验、7项Python registry及current合同校验通过；另行26项Python tooling与37项focused Swift通过。两个实际development package冷构建、44项公开CLI入口smoke和性能证据收集的可审计unknown测试均通过，后者不是实体性能通过声明。包内实际`launch --help`也确认`--env`完整描述；development App及candidate/测试证据保存到主工作区的同名observations目录，不作为正式分发版。
+- 证据目录：`build/observations/build-toolchain-20261014/`（build/check、初始失败定位、focused/Python/self-test及debug/packaged launch help日志；`development/PulsePhone.app`与`objects/`为开发验证产物）。下一动作：生成正式candidate并在没有预建PulsePhone产品目录的新用户环境完成packaged验收；OBS保持`investigating`，`launch --env`实机状态仍为`DV-013/notTested`。
