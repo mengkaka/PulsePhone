@@ -139,9 +139,17 @@ func TestRemoteXPCHandshakeAcknowledgesPeerSettingsBeforeReturning(t *testing.T)
 			return
 		}
 		for index := 0; index < 7; index++ {
-			if _, err := ReadHTTP2Frame(server, RemoteXPCMaxFrame); err != nil {
+			frame, err := ReadHTTP2Frame(server, RemoteXPCMaxFrame)
+			if err != nil {
 				errors <- err
 				return
+			}
+			if frame.Type == HTTP2Data {
+				wrapper, err := DecodeXPCWrapper(frame.Payload, RemoteXPCMaxMessage)
+				if err != nil || wrapper.MessageID != 0 {
+					errors <- fmt.Errorf("handshake ID=%d err=%v", wrapper.MessageID, err)
+					return
+				}
 			}
 		}
 		encoded, err := (HTTP2Frame{Type: HTTP2Settings}).Encode()
@@ -169,6 +177,9 @@ func TestRemoteXPCHandshakeAcknowledgesPeerSettingsBeforeReturning(t *testing.T)
 	if err := connection.Handshake(time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
+	if connection.nextMessage[1] != 1 {
+		t.Fatalf("handshake consumed ordinary request sequence: %d", connection.nextMessage[1])
+	}
 	if len(client.deadlines) != 2 || client.deadlines[0].IsZero() || !client.deadlines[1].IsZero() {
 		t.Fatalf("handshake deadlines = %#v, want bounded then cleared", client.deadlines)
 	}
@@ -193,5 +204,70 @@ func TestRemoteXPCHandshakeAcknowledgesPeerSettingsBeforeReturning(t *testing.T)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("server did not receive settings acknowledgement")
+	}
+}
+
+func TestRemoteXPCOutgoingOddSequenceIndependentOfIncomingHandshakeAndReplies(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	connection := NewRemoteXPCConnection(client)
+	_ = client.SetDeadline(time.Now().Add(time.Second))
+	done := make(chan error, 1)
+	go func() {
+		defer server.Close()
+		for i := 0; i < 8; i++ {
+			frame, err := ReadHTTP2Frame(server, RemoteXPCMaxFrame)
+			if err != nil {
+				done <- err
+				return
+			}
+			wrapper, err := DecodeXPCWrapper(frame.Payload, RemoteXPCMaxMessage)
+			if err != nil {
+				done <- err
+				return
+			}
+			if wrapper.MessageID != uint64(1+2*i) {
+				done <- fmt.Errorf("request %d ID=%d", i, wrapper.MessageID)
+				return
+			}
+			// Delayed initialization and unrelated inbound IDs must not reset or skip
+			// our outbound sequence (the original failure was 1,1,2).
+			wrappers := [][]byte{encodeXPCControl(XPCAlwaysSet, 0)}
+			empty, _ := EncodeXPCWrapper(map[string]any{}, 0, false)
+			reply, _ := EncodeXPCWrapper(map[string]any{"result": "ok"}, uint64(200+i), false)
+			wrappers = append(wrappers, empty, reply)
+			for _, payload := range wrappers {
+				raw, _ := (HTTP2Frame{Type: HTTP2Data, StreamID: 1, Payload: payload}).Encode()
+				if _, err := server.Write(raw); err != nil {
+					done <- err
+					return
+				}
+			}
+		}
+		done <- nil
+	}()
+	for i := 0; i < 8; i++ {
+		if err := connection.SendRequest(map[string]any{"request": XPCInt64(i)}, true); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := connection.ReceiveResponse(RemoteXPCMaxMessage); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+func TestRemoteXPCRejectsExhaustedOrInvalidSequenceWithoutWriting(t *testing.T) {
+	for _, id := range []uint64{0, 2, ^uint64(0)} {
+		conn := &deadlineRecordingConn{}
+		remote := NewRemoteXPCConnection(conn)
+		remote.nextMessage[1] = id
+		if err := remote.SendRequest(map[string]any{"test": true}, true); err == nil {
+			t.Fatalf("accepted ID %d", id)
+		}
+		if remote.nextMessage[1] != id {
+			t.Fatal("sequence wrapped")
+		}
 	}
 }

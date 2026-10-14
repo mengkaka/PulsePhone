@@ -50,6 +50,7 @@ const (
 
 type ProductError struct {
 	Code             string
+	CommitState      string
 	Committed        bool
 	Details          map[string]any
 	OutcomeUnknown   bool
@@ -163,6 +164,8 @@ func (err *ProductError) Error() string {
 
 type Backend struct {
 	mu                         sync.Mutex
+	appControlGate             chan struct{}
+	openAppControlService      func(time.Time) (*CoreDeviceService, error)
 	runtimeEpoch               uint64
 	rawUDID                    string
 	connectionEpoch            uint64
@@ -446,6 +449,17 @@ func (backend *Backend) ensureReady(deadline time.Time) error {
 		backend.mu.Unlock()
 		_, _ = backend.coordinator.RetireCurrentWithReason("quiesce")
 		return errors.New("CoreDevice backend closed")
+	}
+	// Another caller may already have installed (and repaired) this generation.
+	// Never overwrite its current facet cache with the earlier warm snapshot.
+	if backend.tunnel != nil && len(backend.services) != 0 {
+		backend.mu.Unlock()
+		return nil
+	}
+	current, currentOK := coordinator.CurrentResources()
+	if !currentOK || current.Snapshot.Identity != resources.Snapshot.Identity || backend.connectionEpoch != resources.Snapshot.Identity.ConnectionEpoch {
+		backend.mu.Unlock()
+		return errors.New("CoreDevice generation changed during startup")
 	}
 	backend.tunnel = tunnel
 	backend.executorGeneration = resources.Snapshot.Identity.ExecutorGeneration
@@ -1012,11 +1026,11 @@ func (backend *Backend) launch(payload map[string]any, deadline time.Time) (map[
 	if err != nil {
 		return nil, &ProductError{Code: "invalidArgument", Stage: "requestValidation"}
 	}
-	service, err := backend.service(coreDeviceServiceAppControl, deadline)
-	if err != nil {
-		return nil, &ProductError{Code: "developerServicesUnavailable", Stage: "openingInputService"}
+	if err := backend.acquireAppControl(deadline); err != nil {
+		return nil, &ProductError{Code: "executionTimeout", Stage: "appControlAcquire"}
 	}
-	_, err = service.InvokeWithDeadline("com.apple.coredevice.feature.launchapplication", map[string]any{
+	defer backend.releaseAppControl()
+	input := map[string]any{
 		"applicationSpecifier": map[string]any{"bundleIdentifier": map[string]any{"_0": bundleID}},
 		"options": map[string]any{
 			"arguments": []any{}, "environmentVariables": environment,
@@ -1025,9 +1039,38 @@ func (backend *Backend) launch(payload map[string]any, deadline time.Time) (map[
 			"platformSpecificOptions": []byte("<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict/></plist>"),
 		},
 		"standardIOIdentifiers": map[string]any{},
-	}, "", deadline)
-	if err != nil {
-		return nil, &ProductError{Code: "appLaunchFailed"}
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		service, err := backend.appControlService(deadline)
+		if err != nil {
+			return nil, &ProductError{Code: "developerServicesUnavailable", Stage: "appControlOpen", RetireGeneration: backend.sharedTunnelUnavailable()}
+		}
+		_, err = service.InvokeWithDeadline("com.apple.coredevice.feature.launchapplication", input, "", deadline)
+		if err == nil {
+			break
+		}
+		var failure *invocationError
+		if errors.As(err, &failure) && failure.rejected {
+			code := "appLaunchFailed"
+			if failure.notInstalled {
+				code = "appNotInstalled"
+			}
+			details := map[string]any{"commitState": "notCommitted"}
+			if failure.nativeCode != "" {
+				details["normalizedBackendCode"] = failure.nativeCode
+			}
+			return nil, &ProductError{Code: code, Stage: "appLaunchRejected", Details: details}
+		}
+		backend.invalidateAppControl(service)
+		if failure == nil || failure.attempted {
+			return nil, &ProductError{Code: "outcomeUnknown", OutcomeUnknown: true, CommitState: "unknown", RetireGeneration: backend.sharedTunnelUnavailable(), Stage: "appLaunchResponse", Details: map[string]any{"reason": "commitStateUnknown"}}
+		}
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return nil, &ProductError{Code: "executionTimeout", Stage: "appLaunchBeforeSend"}
+		}
+		if attempt == 1 {
+			return nil, &ProductError{Code: "developerServicesUnavailable", Stage: "appLaunchBeforeSend"}
+		}
 	}
 	return map[string]any{"bundleID": bundleID, "disposition": "launchRequested", "resolvedRouteID": "coredevice.appLaunch"}, nil
 }

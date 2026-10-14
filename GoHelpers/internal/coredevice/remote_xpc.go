@@ -76,7 +76,7 @@ type RemoteXPCConnection struct {
 }
 
 func NewRemoteXPCConnection(conn net.Conn) *RemoteXPCConnection {
-	return &RemoteXPCConnection{conn: conn, reader: bufio.NewReader(conn), nextMessage: map[uint32]uint64{1: 0, 3: 0}}
+	return &RemoteXPCConnection{conn: conn, reader: bufio.NewReader(conn), nextMessage: map[uint32]uint64{1: 1, 3: 0}}
 }
 
 // SetHandshakeTrace observes handshake phase boundaries. Callers use it only
@@ -112,7 +112,7 @@ func (connection *RemoteXPCConnection) Handshake(deadline time.Time) error {
 	binary.BigEndian.PutUint32(settings[8:12], 16*1024*1024)
 	var increment [4]byte
 	binary.BigEndian.PutUint32(increment[:], 16*1024*1024-65_535)
-	emptyRequest, err := EncodeXPCWrapper(map[string]any{}, connection.nextMessage[1], false)
+	emptyRequest, err := EncodeXPCWrapper(map[string]any{}, 0, false)
 	if err != nil {
 		return err
 	}
@@ -130,7 +130,6 @@ func (connection *RemoteXPCConnection) Handshake(deadline time.Time) error {
 		return err
 	}
 	connection.traceHandshake("initialWriteComplete")
-	connection.nextMessage[1]++
 	connection.nextMessage[3]++
 	for {
 		connection.traceHandshake("settingsReadStart")
@@ -226,7 +225,6 @@ func (connection *RemoteXPCConnection) ReceiveResponse(maximum int) (map[string]
 			continue
 		}
 		connection.previousData = nil
-		connection.nextMessage[frame.StreamID] = wrapper.MessageID + 1
 		if wrapper.Payload == nil {
 			continue
 		}
@@ -260,6 +258,11 @@ func (connection *RemoteXPCConnection) sendRequestLockedOrdered(value XPCOrdered
 }
 
 func (connection *RemoteXPCConnection) sendRequestObjectLocked(value any, wantingReply bool) error {
+	// The initiator owns an odd sequence, independent of incoming wrappers.
+	// Reserve the final value rather than permitting overflow and ID reuse.
+	if connection.nextMessage[1] == 0 || connection.nextMessage[1]%2 == 0 || connection.nextMessage[1] == ^uint64(0) {
+		return errors.New("remote XPC request sequence exhausted or invalid")
+	}
 	encoded, err := encodeXPCWrapperObject(value, connection.nextMessage[1], wantingReply)
 	if err != nil {
 		return err
@@ -267,7 +270,7 @@ func (connection *RemoteXPCConnection) sendRequestObjectLocked(value any, wantin
 	if err := connection.writeFrame(HTTP2Frame{Type: HTTP2Data, StreamID: 1, Payload: encoded}); err != nil {
 		return err
 	}
-	connection.nextMessage[1]++
+	connection.nextMessage[1] += 2
 	return nil
 }
 

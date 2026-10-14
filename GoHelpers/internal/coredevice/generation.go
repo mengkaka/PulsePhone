@@ -390,3 +390,34 @@ func cloneStrings(value map[string]string) map[string]string {
 	}
 	return result
 }
+
+// replaceFacet atomically updates the generation's ownership record. Network
+// opens and resource closes happen outside these locks. A retired generation
+// never takes ownership of a late replacement.
+func (c *Coordinator) replaceFacet(identity GenerationIdentity, facet string, expected, replacement Closable) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	g := c.current
+	if g == nil || g.identity != identity {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.state != "ready" || g.services == nil || g.services.byFacet[facet] != expected {
+		return false
+	}
+	resources := make([]Closable, 0, len(g.services.resources)+1)
+	for _, resource := range g.services.resources {
+		if resource != expected {
+			resources = append(resources, resource)
+		}
+	}
+	if replacement == nil {
+		delete(g.services.byFacet, facet)
+	} else {
+		g.services.byFacet[facet] = replacement
+		resources = append(resources, replacement)
+	}
+	g.services.resources = resources
+	return true
+}

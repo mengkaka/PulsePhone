@@ -492,7 +492,7 @@ func (conn *tcpConn) Write(data []byte) (int, error) {
 			count = userspaceMSS
 		}
 		conn.mu.Lock()
-		if conn.state != tcpEstablished {
+		if conn.state != tcpEstablished || conn.eof || conn.err != nil {
 			err := conn.err
 			if err == nil {
 				err = errors.New("TCP connection is not established")

@@ -989,3 +989,14 @@ func writeCoreDeviceFixtureInput(t *testing.T, writer io.Writer, fields map[stri
 		t.Fatal(err)
 	}
 }
+
+func TestCoreDeviceLaunchUnknownSubmissionPreservesCommitStateWithoutRetiringHelper(t *testing.T) {
+	result := coreDeviceRequestFailure(&coredevice.ProductError{Code: "outcomeUnknown", OutcomeUnknown: true, CommitState: "unknown", Stage: "appLaunchResponse", Details: map[string]any{"reason": "commitStateUnknown"}})
+	if result.CommitState != "unknown" || !result.OutcomeUnknown || result.Committed || result.ExitAfterResult || result.ErrorDetails["reason"] != "commitStateUnknown" {
+		t.Fatalf("result %#v", result)
+	}
+	rejection := coreDeviceRequestFailure(&coredevice.ProductError{Code: "appNotInstalled", Stage: "appLaunchRejected", Details: map[string]any{"normalizedBackendCode": "NSOSStatusErrorDomain:-10814"}})
+	if rejection.OutcomeUnknown || rejection.Committed || rejection.ExitAfterResult || rejection.ErrorDetails["normalizedBackendCode"] != "NSOSStatusErrorDomain:-10814" {
+		t.Fatalf("result %#v", rejection)
+	}
+}

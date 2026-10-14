@@ -416,3 +416,35 @@ func (t *retirementFailureTunnel) Close() error {
 	*t.events = append(*t.events, "close:tunnel")
 	return t.closeErr
 }
+
+func TestCoordinatorFacetReplacementMaintainsOwnershipAndRejectsStaleGeneration(t *testing.T) {
+	identity := GenerationIdentity{RuntimeEpoch: 1, ConnectionEpoch: 2, ExecutorGeneration: 3}
+	old, replacement, other := &facetCountingCloser{}, &facetCountingCloser{}, &facetCountingCloser{}
+	bundle := &ServiceBundle{byFacet: map[string]Closable{"appControl": old, "hid": other}, resources: []Closable{old, other}}
+	g := &generation{identity: identity, state: "ready", services: bundle}
+	coordinator := &Coordinator{current: g}
+	if coordinator.replaceFacet(GenerationIdentity{}, "appControl", old, nil) {
+		t.Fatal("accepted wrong identity")
+	}
+	if !coordinator.replaceFacet(identity, "appControl", old, nil) {
+		t.Fatal("invalidation failed")
+	}
+	_ = old.Close()
+	if coordinator.replaceFacet(identity, "appControl", old, replacement) {
+		t.Fatal("accepted stale expected resource")
+	}
+	if !coordinator.replaceFacet(identity, "appControl", nil, replacement) {
+		t.Fatal("replacement failed")
+	}
+	_, _ = g.retire()
+	if coordinator.replaceFacet(identity, "appControl", nil, &facetCountingCloser{}) {
+		t.Fatal("accepted retired generation")
+	}
+	if old.closed != 1 || replacement.closed != 1 || other.closed != 1 {
+		t.Fatalf("close counts: old=%d new=%d other=%d", old.closed, replacement.closed, other.closed)
+	}
+}
+
+type facetCountingCloser struct{ closed int }
+
+func (c *facetCountingCloser) Close() error { c.closed++; return nil }

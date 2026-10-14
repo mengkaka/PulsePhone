@@ -301,6 +301,7 @@ type RSDClient struct {
 	dial       func(port uint16, deadline time.Time) (net.Conn, error)
 	servicesMu sync.Mutex
 	services   []*CoreDeviceService
+	closed     bool
 }
 
 type RSDIdentityError struct {
@@ -383,16 +384,26 @@ func (client *RSDClient) Close() error {
 		return nil
 	}
 	client.servicesMu.Lock()
+	client.closed = true
 	services := append([]*CoreDeviceService(nil), client.services...)
 	client.services = nil
 	client.servicesMu.Unlock()
 	for _, service := range services {
 		_ = service.Close()
 	}
-	return client.connection.Close()
+	if client.connection != nil {
+		return client.connection.Close()
+	}
+	return nil
 }
 
 func (client *RSDClient) StartService(name string, deadline time.Time) (*CoreDeviceService, error) {
+	client.servicesMu.Lock()
+	closed := client.closed
+	client.servicesMu.Unlock()
+	if closed {
+		return nil, &RSDServiceError{Err: errors.New("RSD client closed")}
+	}
 	info, ok := client.PeerInfo.Services[name]
 	if !ok {
 		return nil, &RSDServiceError{Err: fmt.Errorf("RSD service unavailable: %s", name)}
@@ -466,6 +477,11 @@ func (client *RSDClient) StartService(name string, deadline time.Time) (*CoreDev
 		}
 	}
 	client.servicesMu.Lock()
+	if client.closed {
+		client.servicesMu.Unlock()
+		_ = service.Close()
+		return nil, &RSDServiceError{Err: errors.New("RSD client closed during service open")}
+	}
 	client.services = append(client.services, service)
 	client.servicesMu.Unlock()
 	return service, nil
@@ -521,6 +537,16 @@ func (service *CoreDeviceService) Close() error {
 	remote := service.remote
 	plist := service.plist
 	service.mu.Unlock()
+	if service.rsd != nil {
+		service.rsd.servicesMu.Lock()
+		for index, current := range service.rsd.services {
+			if current == service {
+				service.rsd.services = append(service.rsd.services[:index], service.rsd.services[index+1:]...)
+				break
+			}
+		}
+		service.rsd.servicesMu.Unlock()
+	}
 	if remote != nil {
 		return remote.Close()
 	}
@@ -656,11 +682,14 @@ func (service *CoreDeviceService) invoke(feature string, input map[string]any, a
 	service.mu.Lock()
 	defer service.mu.Unlock()
 	if service.closed || service.remote == nil {
-		return nil, errors.New("CoreDevice service is not RemoteXPC")
+		return nil, &invocationError{stage: "beforeSend"}
+	}
+	if err := service.remote.preflight(deadline); err != nil {
+		return nil, &invocationError{stage: "beforeSend", err: err}
 	}
 	if !deadline.IsZero() {
 		if err := service.remote.conn.SetDeadline(deadline); err != nil {
-			return nil, err
+			return nil, &invocationError{stage: "beforeSend", err: err}
 		}
 		defer service.remote.conn.SetDeadline(time.Time{})
 	}
@@ -671,7 +700,7 @@ func (service *CoreDeviceService) invoke(feature string, input map[string]any, a
 		if feature == "com.apple.coredevice.feature.getdisplayinfo" {
 			traceDisplayGeometry("remoteXPCSendFailed")
 		}
-		return nil, err
+		return nil, &invocationError{attempted: true, stage: "sendOrReceive", err: err}
 	}
 	if feature == "com.apple.coredevice.feature.getdisplayinfo" {
 		traceDisplayGeometry("remoteXPCRequestSent")
@@ -682,14 +711,17 @@ func (service *CoreDeviceService) invoke(feature string, input map[string]any, a
 		if feature == "com.apple.coredevice.feature.getdisplayinfo" {
 			traceDisplayGeometry("remoteXPCReceiveFailed")
 		}
-		return nil, err
+		return nil, &invocationError{attempted: true, stage: "sendOrReceive", err: err}
 	}
 	if feature == "com.apple.coredevice.feature.getdisplayinfo" {
 		traceDisplayGeometry("remoteXPCResponseReceived")
 	}
+	if rejection, ok := response["CoreDevice.error"].(map[string]any); ok {
+		return nil, normalizeInvocationRejection(rejection)
+	}
 	output, ok := response["CoreDevice.output"].(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("CoreDevice invocation failed for %s", feature)
+		return nil, &invocationError{attempted: true, stage: "response", err: errors.New("CoreDevice response missing output")}
 	}
 	return output, nil
 }

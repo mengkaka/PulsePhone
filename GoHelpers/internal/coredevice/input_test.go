@@ -709,8 +709,8 @@ func TestSoftwareKeyboardToggleReusesGenerationButtonService(t *testing.T) {
 			t.Fatalf("result = %#v", result)
 		}
 	}
-	if got := button.remote.nextMessage[1]; got != 4 {
-		t.Fatalf("button requests = %d, want 4", got)
+	if got := button.remote.nextMessage[1]; got != 9 {
+		t.Fatalf("next button request ID = %d, want 9 (4 requests)", got)
 	}
 }
 
@@ -776,8 +776,8 @@ func TestStreamsReuseGenerationInputServices(t *testing.T) {
 	if keyboardServiceOpens != 1 || keyboardReadinessWaits != 1 {
 		t.Fatalf("keyboard opens=%d readiness waits=%d", keyboardServiceOpens, keyboardReadinessWaits)
 	}
-	if got := hid.remote.nextMessage[1]; got != 10 {
-		t.Fatalf("HID reports = %d, want 10", got)
+	if got := hid.remote.nextMessage[1]; got != 21 {
+		t.Fatalf("next HID request ID = %d, want 21 (10 reports)", got)
 	}
 	if backend.services[coreDeviceServiceHID] != hid || backend.services[coreDeviceServiceButton] != button {
 		t.Fatal("streams did not retain generation services")

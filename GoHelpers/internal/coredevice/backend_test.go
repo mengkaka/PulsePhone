@@ -491,8 +491,8 @@ func TestBackendExecuteMatchesLegacyModernRouteTranscript(t *testing.T) {
 	if err != nil || launched["disposition"] != "launchRequested" || launched["bundleID"] != "com.example.App" {
 		t.Fatalf("launch result=%#v err=%v", launched, err)
 	}
-	if orientationRequests != 1 || hid.remote.nextMessage[1] != 6 {
-		t.Fatalf("orientation requests=%d HID reports=%d", orientationRequests, hid.remote.nextMessage[1])
+	if orientationRequests != 1 || hid.remote.nextMessage[1] != 13 {
+		t.Fatalf("orientation requests=%d next HID request ID=%d", orientationRequests, hid.remote.nextMessage[1])
 	}
 	verifyPasteboardSessions()
 	if err := <-launchResult; err != nil {

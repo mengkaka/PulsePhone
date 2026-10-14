@@ -186,7 +186,7 @@ func coreDeviceRequestFailure(err error) helperapp.RequestResult {
 	if phase == "" {
 		phase = "executingProductRoute"
 	}
-	return coreDeviceFailureResult(
+	result := coreDeviceFailureResult(
 		productErr.Code,
 		phase,
 		productErr.Stage,
@@ -195,6 +195,8 @@ func coreDeviceRequestFailure(err error) helperapp.RequestResult {
 		productErr.OutcomeUnknown,
 		productErr.RetireGeneration,
 	)
+	result.CommitState = productErr.CommitState
+	return result
 }
 
 func coreDeviceStreamFailure(err error) *helperapp.RequestResult {

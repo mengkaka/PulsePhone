@@ -1693,4 +1693,6 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 - 根因：发送 ID 被接收消息覆盖且普通请求按 +1 递增，原连接实测 1,1,2 后设备 FIN/EOF。只移除覆盖得到 1,2 仍失败；独立奇数序列同一连接连续 8 次成功。原 launch 将所有错误折叠 appLaunchFailed 且继续缓存失效连接。没有证据断言设备守护进程崩溃。
 - 计划：先合同；实现独立奇数序列、串行 appControl 局部失效/按需替换与资源 ownership CAS、发送边界/显式拒绝分类；focused/race/全量 check/build；development packaged 真机连续 launch 与不存在 bundle 的明确拒绝；关闭前记录精确产物/证据。
 - 诊断证据：`build/observations/remotexpc-launch-fix-20261014/`；旧 iOS 14–16 使用 DTX，无同类编号缺陷，实体旧系统未重测，不扩大版本验收。
-- 唯一下一动作：实施并运行回归。
+- 实施 checkpoint：合同 `1a7b6fd`；独立奇数发送序列、bounded appControl gate、generation ownership CAS 与 RSD registry 清理已实现。显式拒绝保留标准化 native domain/code；发送后错误为 unknown commit state，不重放、不单独退出 helper；确认共享 TCP stack/RSD 失效时沿用 generation retirement。
+- 自动化：CoreDevice、helper 和 legacy direct 全量 focused 通过；三个包 `go test -race` 通过（证据 `focused.log`、`race.log`）。覆盖连续编号/延迟握手、局部重建、deadline、零字节不确定 write、EOF/超时/半截响应、拒绝隐私、并发 launch、epoch/retire竞争、owner 资源关闭及共享 tunnel 升级。
+- 唯一下一动作：提交源码、完整 make check/build、development packaged 真机验证。
