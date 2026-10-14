@@ -2498,6 +2498,8 @@ packaging 必须保留 registry canonical bytes/hash fixture 所对应的文件�
 
 开发与验证使用本机稳定版 Go `1.26.x`（包括 `1.26.0`）；`make doctor`拒绝其他minor系列、预发布及devel版本。`GoHelpers/go.mod`中的`toolchain go1.26.2`保留为推荐基线，不作为精确patch版本门禁；build/test/dependency校验继续使用`GOTOOLCHAIN=local`，不自动下载或切换工具链。
 
+`Scripts/package-app`的Release编译及`--show-bin-path`统一显式选择SwiftPM `--build-system native`，保留单job、关闭whole-module optimization、单frontend thread及无debug info的既有参数。Xcode 27默认swiftbuild引擎对这些参数生成不一致的dependency output（缺少`*-primary.d`），不能依赖工具链默认引擎；native目前仍受支持但已被上游标记deprecated，后续迁移必须同时验证实际Release编译与产物规范，不得仅更改bin-path查询。
+
 ```text
 .build/
   SwiftPM objects, modules and test products

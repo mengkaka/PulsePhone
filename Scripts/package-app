@@ -414,7 +414,7 @@ def swift_build_arguments(
     disable_sandbox: bool = False,
 ) -> list[str]:
     arguments = [
-        "/usr/bin/xcrun", "swift", "build", "-c", "release",
+        "/usr/bin/xcrun", "swift", "build", "--build-system", "native", "-c", "release",
         "--scratch-path", str(scratch), "--product", product, "--jobs", "1",
         "-Xswiftc", "-no-whole-module-optimization",
         "-Xswiftc", "-num-threads", "-Xswiftc", "1",
@@ -534,6 +534,7 @@ def swift_products(build_root: Path) -> dict[str, Path]:
         [
             "/usr/bin/xcrun", "swift", "build",
             *(["--disable-sandbox"] if disable_sandbox else []),
+            "--build-system", "native",
             "-c", "release", "--scratch-path", str(scratch), "--show-bin-path",
         ],
         cwd=ROOT,
@@ -1268,6 +1269,7 @@ def self_test() -> dict[str, Any]:
         swift_arguments = swift_build_arguments(Path("/tmp/pulsephone-swift"), "PulsePhone")
         require(
             swift_arguments[-2:] == ["-debug-info-format", "none"]
+            and swift_arguments[swift_arguments.index("--build-system") + 1] == "native"
             and swift_arguments[swift_arguments.index("--jobs") + 1] == "1"
             and "-no-whole-module-optimization" in swift_arguments
             and swift_arguments[swift_arguments.index("-num-threads") + 2] == "1",
