@@ -41,7 +41,7 @@ deferred -> ready -> verifying
 
 | ID | 暂缓验证 | 范围 | 状态 | 激活条件 |
 | --- | --- | --- | --- | --- |
-| `DV-001` | Apple notarization与外部分发凭据 | Optional High-Assurance / external distribution | `deferred` | owner明确激活外部分发并授权可用notary credential |
+| `DV-001` | Apple notarization与外部分发凭据 | Optional High-Assurance / external distribution | `verified` | 0.2.3 build 1 已完成明确授权的签名、公证、staple、Gatekeeper与归档校验；未来candidate须重新验证 |
 | `DV-002` | clean macOS、可搬移安装与无开发环境运行 | Optional High-Assurance | `deferred` | 提供可重置clean macOS 14 arm64主机或VM |
 | `DV-003` | 两台并发USB iPhone与错目标安全矩阵 | Optional High-Assurance / target safety extension | `deferred` | 至少两台设备可稳定同时连接并允许执行受控多设备场景 |
 | `DV-004` | legacy、iOS 17.x与broad OS exact-build矩阵 | Optional High-Assurance / compatibility extension | `deferred` | 对应设备在执行窗口可用；broad claim具备固定lower/intermediate/upper slots |
@@ -65,9 +65,11 @@ deferred -> ready -> verifying
 
 - 合同引用：PRD交付范围；TRD 08 §35～§36、§42；`OPTIONAL_HIGH_ASSURANCE_VALIDATION.md` §4。
 - 历史来源：已封存TODO `EXT-001`、`M3-009`。
-- 当前原因：默认产品交付不要求Apple notarization；当前没有记录已授权给Agent使用的notarytool credential。
-- 允许跳过：notary submission、staple、Gatekeeper外部分发闭环。
-- 不得声明：不得称当前产物已经完成Developer ID外部分发、公证或最终Formal Release。
+- 当前状态：`verified`。2026-10-14 owner明确授权构建并发布0.2.3 build 1；本次使用历史Developer ID证书与已配置的keychain profile完成外部分发验证，没有激活完整Optional High-Assurance profile。
+- 精确candidate：source commit `b9edad5f63a376319b54240b658539570d58bbfa`，version `0.2.3`、build `1`，macOS arm64；archive SHA-256 `a8f4c638e57d9a637dc14999b2c8183a8fd17bb423937847a522303dc917242a`。
+- 已通过：Developer ID/hardened runtime/secure timestamp签名、Apple notarization Accepted（submission `6a7757ec-c4f2-425c-bcd4-9fd949d1e08e`）、staple及validate、deep/strict codesign与Gatekeeper `Notarized Developer ID`。ZIP解压后的文件hash/mode与签名staging一致，版本与CLI help smoke通过。
+- 证据：`build/evidence/release-0.2.3-build1/`中的`release-result.json`、`release-app.log`、`archive-validation.log`、`verification.json`及`release-notes.md`；发布tag `v0.2.3`。
+- 声明边界：只关闭上述exact candidate的签名/公证/归档验证，不代表clean host、扩展OS矩阵或最终Formal profile全部通过；未来candidate须重新执行本项验证。
 - 通过条件：对exact candidate完成签名、公证、staple、Gatekeeper和byte identity验证并保存允许的证据。
 
 ### DV-002 clean macOS、可搬移安装与无开发环境运行
