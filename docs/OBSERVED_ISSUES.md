@@ -62,7 +62,7 @@
 | `OBS-035` | `type --text` 第二次调用复用已关闭的 Pasteboard 会话 | High | `resolved` | `f2071f0` 修复；iOS 26.5.2 连续实体输入通过，无粘贴权限弹窗 |
 | `OBS-036` | 高位 ECID 被 Lockdown 整数解析拒绝，导致 iOS 17+ prepare 误报 Developer Support 不可用 | High | `investigating` | 高位 `UniqueChipID` unsigned parsing；等待 packaged candidate 验证 |
 | `OBS-038` | 新用户目录下Runtime启动被Developer Image store目录初始化阻断 | High | `investigating` | 目录回归、完整构建和make check通过；等待fresh-user packaged验证 |
-| `OBS-040` | 连续 launch 的 RemoteXPC 编号及失效 appControl 缓存导致 EOF | High | `investigating` | 修复奇数发送序列、局部恢复与失败分类；待回归及打包真机验证 |
+| `OBS-040` | 连续 launch 的 RemoteXPC 编号及失效 appControl 缓存导致 EOF | High | `resolved` | `2a2790c`；奇数序列/局部恢复/分类回归及 build 18 独立真机连续启动通过 |
 | `OBS-039` | iOS 26.6 安装签名测试 IPA 在 AFC staging 初始化阶段失败 | Medium | `resolved` | `e7ef4ac`修复AFC状态4/8与0/16；build 7缺目录及已有目录安装/卸载真机通过 |
 
 ## OBS-001：关闭已绑定视频的 live 窗口时 GUIHost 崩溃
@@ -1688,11 +1688,9 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 
 ## OBS-040：连续 launch 的 RemoteXPC 编号与连接失效恢复
 
-- 状态：`investigating`（2026-10-14）；严重度：High。owner 授权直接在 main 修复三个维度并补回归。
-- 合同：PRD mutating retry 边界；TRD 03 RemoteXPC 请求编号；TRD 06 app.launch 连接失效与结果分类。
-- 根因：发送 ID 被接收消息覆盖且普通请求按 +1 递增，原连接实测 1,1,2 后设备 FIN/EOF。只移除覆盖得到 1,2 仍失败；独立奇数序列同一连接连续 8 次成功。原 launch 将所有错误折叠 appLaunchFailed 且继续缓存失效连接。没有证据断言设备守护进程崩溃。
-- 计划：先合同；实现独立奇数序列、串行 appControl 局部失效/按需替换与资源 ownership CAS、发送边界/显式拒绝分类；focused/race/全量 check/build；development packaged 真机连续 launch 与不存在 bundle 的明确拒绝；关闭前记录精确产物/证据。
-- 诊断证据：`build/observations/remotexpc-launch-fix-20261014/`；旧 iOS 14–16 使用 DTX，无同类编号缺陷，实体旧系统未重测，不扩大版本验收。
-- 实施 checkpoint：合同 `1a7b6fd`；独立奇数发送序列、bounded appControl gate、generation ownership CAS 与 RSD registry 清理已实现。显式拒绝保留标准化 native domain/code；发送后错误为 unknown commit state，不重放、不单独退出 helper；确认共享 TCP stack/RSD 失效时沿用 generation retirement。
-- 自动化：CoreDevice、helper 和 legacy direct 全量 focused 通过；三个包 `go test -race` 通过（证据 `focused.log`、`race.log`）。覆盖连续编号/延迟握手、局部重建、deadline、零字节不确定 write、EOF/超时/半截响应、拒绝隐私、并发 launch、epoch/retire竞争、owner 资源关闭及共享 tunnel 升级。
-- 唯一下一动作：提交源码、完整 make check/build、development packaged 真机验证。
+- 状态：`resolved`（2026-10-14）；严重度：High。owner 授权直接在 main 实施。合同 `1a7b6fd`，源码 `2a2790c`。
+- 根因与修复：原发送 ID 被接收消息覆盖且按 +1 递增，实测 1,1,2 后 FIN/EOF；只去掉覆盖仍在偶数请求失败。改为独立 1,3,5 序列，握手 0 不消费普通 ID。健康 appControl 串行复用，失效仅清理该 facet，在原 deadline 内最多一次发送前重建；generation/RSD ownership 同步更新，retire/epoch 变化不允许迟到连接装回。发送后错误返回 outcomeUnknown/unknown，不重放；显式拒绝保持健康连接、仅暴露标准化 native domain/code，NSOSStatus -10814 映射 appNotInstalled。已知共享 stack/RSD 失效继续走 generation retirement。
+- 自动化闭环：CoreDevice/helper/legacy direct 全量 focused 与三个包 race 通过；新编号回归在原代码、仅去掉计数覆盖两个版本均预期失败，完整修复通过。覆盖延迟握手/连续编号、局部重建、deadline、零字节不确定 write、EOF/超时/半截响应、拒绝隐私、并发 launch、epoch/retire竞争、替换资源关闭与共享 tunnel 升级。干净源码完整 make check 通过，包括完整构建、Go 全量/两个 Helper、Swift 1102 项（5 skip、零失败）、两次 development 冷打包、CLI smoke、生成文件/Python registry/current 合同。
+- 精确实体闭环：上述源码的 development 0.2.2 build 18 已全局安装，CLI/Runtime/两个 Helper 哈希与 held candidate 一致。boya-iPhone / iOS 26.6 (23G71) 经全局 CLI 连续 8 次启动 ENV Probe 成功；不存在 bundle 明确返回 appNotInstalled 与 CoreDevice 10002/NSOSStatus -10814，随后 launch 仍成功。三张截图确认 PID 3183→3184→3185、abc-8/def11→after-rejection/empty→不传 env 全 unset；测试 App 卸载、apps 确认不存在，Runtime 最终 notRunning。恢复故障由 production Backend/CoreDeviceService framing/race 验证，本次未强制物理 USB 故障；其他 OS 实体矩阵由 DV-013 保留，不扩大通过范围。
+- 初始验收重叠：另一 owner 授权任务同时控制同机，首次 install/launch 有 transportFailure，stop 一度 controlBusy；保留原始失败，不计为通过，也不认定唯一因果。确认另一任务完成后独立 install/launch 全流程成功。
+- 证据：`build/observations/remotexpc-launch-fix-20261014/`（gate/race/负向编号回归、candidate/组件哈希、CLI envelopes、截图/hash、cleanup 及重叠试跑）；candidate input hash `ae90c673dccf979df6fe32be3ceb3b4e1a6cda42c50f661d2c508f887c9255a5`，App content hash `518328473dc225a4793726eb098ab718ad65cd94e0d7f2b798c1224a0d629d91`。
