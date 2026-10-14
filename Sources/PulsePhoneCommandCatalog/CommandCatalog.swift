@@ -13,7 +13,7 @@ public enum CommandCatalogError: Error, Equatable, Sendable {
 }
 
 public enum CommandCatalog {
-    public static let matrixRevision = "command-matrix.v18-20261014"
+    public static let matrixRevision = "command-matrix.v19-20261014"
     public static let registryRelativePath = "Registries/command-catalog.v1.json"
     public static let schemaRelativePath = "Schemas/command-catalog.v1.schema.json"
     public static let resultSchemaDirectory = "Schemas/result-schemas"

@@ -5785,12 +5785,14 @@ public struct ProductionRuntimeOperationBackend: Sendable {
                 omittingEmptySubsequences: false
               ).contains(".."),
               (path as NSString).standardizingPath == path,
-              (path as NSString).pathExtension.lowercased() == "ipa"
+              ["ipa", "app"].contains((path as NSString).pathExtension.lowercased())
         else { return false }
         var metadata = stat()
-        return lstat(path, &metadata) == 0
-            && metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG)
-            && metadata.st_size > 0
+        guard lstat(path, &metadata) == 0 else { return false }
+        if (path as NSString).pathExtension.lowercased() == "app" {
+            return metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+        }
+        return metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) && metadata.st_size > 0
     }
 
     static func pointerObservationPlan(

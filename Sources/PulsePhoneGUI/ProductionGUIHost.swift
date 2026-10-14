@@ -3184,7 +3184,8 @@ public final class ProductionGUIHostWindowController:
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        panel.allowedContentTypes = [UTType(filenameExtension: "ipa") ?? .data]
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "ipa") ?? .data, .applicationBundle]
         panel.beginSheetModal(for: window) { response in
             completion(response == .OK ? panel.url?.path : nil)
         }
@@ -3210,9 +3211,11 @@ public final class ProductionGUIHostWindowController:
         in state: ProductionGUIHostWindowState
     ) {
         do {
+            let type = path.map { ToolbarPicker.nodeTypes($0) }
             let result = try ToolbarPicker.resolve(
                 selectedPath: path,
-                isRegularFile: path.map(Self.isRegularIPAFile) ?? false
+                isRegularFile: type?.isRegularFile ?? false,
+                isDirectory: type?.isDirectory ?? false
             )
             switch result {
             case .cancelled:
@@ -3239,13 +3242,6 @@ public final class ProductionGUIHostWindowController:
             arguments: ["ipaPath": parameter.absoluteIPAPath],
             in: state
         )
-    }
-
-    private static func isRegularIPAFile(_ path: String) -> Bool {
-        var metadata = stat()
-        return lstat(path, &metadata) == 0
-            && metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG)
-            && metadata.st_size > 0
     }
 
     @MainActor

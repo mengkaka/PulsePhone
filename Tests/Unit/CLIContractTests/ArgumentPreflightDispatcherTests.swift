@@ -125,6 +125,7 @@ final class ArgumentPreflightDispatcherTests: XCTestCase {
         let target = ["--udid", "AAAA"]
         let variants: [(String, [String])] = [
             ("app.install", ["install", "--path", "/tmp/Test.ipa"] + target),
+            ("app.install", ["install", "--path", "/tmp/Build Products/Test.app"] + target),
             ("app.list", ["apps"] + target),
             ("app.launch", ["launch", "--bundle-id", "com.example.app"] + target),
             ("app.uninstall", ["uninstall", "--bundle-id", "com.example.app"] + target),
@@ -178,7 +179,8 @@ final class ArgumentPreflightDispatcherTests: XCTestCase {
             ("trace.stop", ["trace", "stop"] + target),
         ]
 
-        XCTAssertEqual(variants.count, 44)
+        XCTAssertEqual(variants.count, 45)
+        XCTAssertEqual(Set(variants.map { $0.0 }).count, 44)
         for (expectedCommandID, arguments) in variants {
             let output = process.run(arguments: arguments + ["--json"])
             XCTAssertEqual(output.chunk.stdout.count, 1, expectedCommandID)

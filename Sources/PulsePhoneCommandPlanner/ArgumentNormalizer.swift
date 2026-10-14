@@ -71,7 +71,11 @@ public enum ArgumentNormalizer {
       }
       return NormalizedArgumentsV1(values: values)
     case "ipaPath.v1":
-      return try normalizedPath(raw, key: "ipaPath", requiredSuffix: ".ipa")
+      let value = try normalizedPath(raw, key: "ipaPath", requiredSuffix: nil)
+      guard let path = raw["ipaPath"], !path.utf8.contains(0), ["ipa", "app"].contains((path as NSString).pathExtension.lowercased()) else {
+        throw ArgumentNormalizationError.invalid("ipaPath")
+      }
+      return value
     case "outputPath.v1":
       return try normalizedPath(raw, key: "outputPath", requiredSuffix: nil)
     case "elementSnapshot.v1":

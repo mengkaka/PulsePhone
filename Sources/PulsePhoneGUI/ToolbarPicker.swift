@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public struct ToolbarInstallParameter: Equatable, Sendable {
     public let absoluteIPAPath: String
@@ -20,10 +21,11 @@ public enum ToolbarPickerError: Error, Equatable, Sendable {
 public enum ToolbarPicker {
     public static func resolve(
         selectedPath: String?,
-        isRegularFile: Bool = true
+        isRegularFile: Bool = true,
+        isDirectory: Bool = false
     ) throws -> ToolbarPickerResult {
         guard let selectedPath else { return .cancelled }
-        guard isRegularFile, validIPAPath(selectedPath) else {
+        guard validIPAPath(selectedPath), matchesInstallType(selectedPath, isRegularFile: isRegularFile, isDirectory: isDirectory) else {
             throw ToolbarPickerError.invalidIPAPath
         }
         return .accepted(ToolbarInstallParameter(
@@ -40,6 +42,17 @@ public enum ToolbarPicker {
                 omittingEmptySubsequences: false
             ).contains("..")
             && (path as NSString).standardizingPath == path
-            && (path as NSString).pathExtension.lowercased() == "ipa"
+            && ["ipa", "app"].contains((path as NSString).pathExtension.lowercased())
+    }
+
+    static func matchesInstallType(_ path: String, isRegularFile: Bool, isDirectory: Bool) -> Bool {
+        (path as NSString).pathExtension.lowercased() == "app" ? isDirectory : isRegularFile
+    }
+
+    static func nodeTypes(_ path: String) -> (isRegularFile: Bool, isDirectory: Bool) {
+        var metadata = stat()
+        guard lstat(path, &metadata) == 0 else { return (false, false) }
+        let type = metadata.st_mode & mode_t(S_IFMT)
+        return (type == mode_t(S_IFREG) && metadata.st_size > 0, type == mode_t(S_IFDIR))
     }
 }

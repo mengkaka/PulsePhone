@@ -25,9 +25,11 @@ final class ProductionIPAInstallButton: NSButton {
         do {
             let parameter = try ToolbarDropTarget.resolve(
                 candidates: droppedFileURLs(sender.draggingPasteboard).map {
-                    ToolbarDropCandidate(
+                    let type = ToolbarPicker.nodeTypes($0.path)
+                    return ToolbarDropCandidate(
                         path: $0.path,
-                        isRegularFile: Self.isRegularFile($0.path)
+                        isRegularFile: type.isRegularFile,
+                        isDirectory: type.isDirectory
                     )
                 }
             )
@@ -47,10 +49,4 @@ final class ProductionIPAInstallButton: NSButton {
         return values.compactMap { ($0 as? NSURL) as URL? }
     }
 
-    private static func isRegularFile(_ path: String) -> Bool {
-        var metadata = stat()
-        return lstat(path, &metadata) == 0
-            && metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG)
-            && metadata.st_size > 0
-    }
 }

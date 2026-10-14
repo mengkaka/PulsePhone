@@ -114,6 +114,11 @@ func TestInstallRouteProjectsPreAndPostCommitFailures(t *testing.T) {
 			details: map[string]any{"commitState": "notCommitted", "stage": "archivePreflight"},
 		},
 		{
+			name: "app platform rejected before device access", openIPA: errAppPlatform,
+			code: "invalidIPA", commit: "notCommitted", outcome: "failed",
+			details: map[string]any{"commitState": "notCommitted", "stage": "appPlatform"},
+		},
+		{
 			name:      "AFC upload failure is not committed",
 			afcUpload: errors.New("read failure"),
 			code:      "installFailed",
@@ -171,6 +176,9 @@ func TestInstallRouteProjectsPreAndPostCommitFailures(t *testing.T) {
 			if failure == nil || failure.Code != test.code || failure.CommitState != test.commit || failure.Outcome != test.outcome ||
 				!reflect.DeepEqual(failure.Details, test.details) {
 				t.Fatalf("failure = %#v", failure)
+			}
+			if test.openIPA != nil && containsEvent(events, "lockdown.open") {
+				t.Fatal("invalid source opened device services")
 			}
 			if test.wantService && !containsEvent(events, "proxy.create") {
 				t.Fatalf("service was not opened: %#v", events)

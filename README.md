@@ -7,7 +7,7 @@ Use PulsePhone on supported iPhones without installing Xcode. It does not instal
 
 ## Public Contract
 
-- Command matrix: `command-matrix.v18-20261014`
+- Command matrix: `command-matrix.v19-20261014`
 - Product Actions: 52
 - Supporting Actions: 21
 - Non-command features: 6
@@ -42,6 +42,15 @@ PulsePhone skill install --agent all
 ```
 
 Install to another agent's absolute skill root with `PulsePhone skill install --skill-root /absolute/path`. Use `PulsePhone skill status` to inspect managed targets. If a managed skill was edited locally, rerun the install with `--force` only when replacing those managed files is intended.
+
+## Install iPhone Apps
+
+```sh
+PulsePhone install --path /absolute/path/App.ipa --udid UDID
+PulsePhone install --path /absolute/Build/Products/Debug-iphoneos/App.app --udid UDID
+```
+
+Use a signed iPhoneOS device build provisioned for the target iPhone. Simulator and macOS .app bundles are rejected. PulsePhone temporarily packages .app contents into an IPA, preserves signed bytes, executable permissions and internal relative symlinks, and removes the temporary archive after the operation. It does not re-sign or modify the source app. The generated archive must be smaller than 4 GiB and the source tree may contain at most 65,532 nodes. The Live GUI Install App picker and drop target accept both formats.
 
 ## OmniParser
 
@@ -158,6 +167,6 @@ make verify-m2-gate
 
 Tracked projections:
 
-- `Fixtures/product-matrix/public-surface.v1.json` `b2feec1026c4d0d7770dd3c15746873825ef1fae9df5c05fa6ad3b2c275ef12b`
+- `Fixtures/product-matrix/public-surface.v1.json` `74ac17251d1db538bd30b9d797e87b8d5bbd572a77d5fef51b80aea86d0192e3`
 - `Fixtures/product-matrix/behavior-matrix.v1.json` `fc4562b270abee08d1655c0ab197b534d08a5fee304782cc37cc448d753229b6`
 - `Fixtures/product-matrix/integration-coverage.v1.json` `f1a1c64f8c32af2b3174911d21a230056f921186a23e2f7911b6e7a6187e9ca1`

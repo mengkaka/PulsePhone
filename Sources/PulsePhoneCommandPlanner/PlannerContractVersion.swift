@@ -1,7 +1,7 @@
 import PulsePhoneCommandCatalog
 
 public enum PlannerContractVersion {
-  public static let current = "planner-contract.v6-20261014"
+  public static let current = "planner-contract.v7-20261014"
 
   public static func identity(version: String = current) -> PlannerContractIdentity {
     PlannerContractIdentity(
@@ -17,6 +17,7 @@ public enum PlannerContractVersion {
             "gestureDurationMaximumMs": .uint64(30_000),
             "gestureDurationMinimumMs": .uint64(1),
             "pathMaximumBytes": .uint64(4_096),
+            "installationPathExtensions": .stringSet(["app", "ipa"]),
             "pointFractionMaximumDigits": .uint64(18),
             "supportedSchemaIDs": .stringSet([
               "appLaunch.v1", "bundleID.v1", "elementSnapshot.v1", "guiSavePanel.v1", "guiWindowContext.v1",
@@ -29,7 +30,7 @@ public enum PlannerContractVersion {
             "textMaximumBytes": .uint64(65_536),
           ],
           ruleID: "planner.argument-normalizer.v1",
-          ruleVersion: 2
+          ruleVersion: 3
         ),
         PlannerRuleIdentity(
           parameters: [

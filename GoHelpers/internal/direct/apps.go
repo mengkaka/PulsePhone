@@ -77,7 +77,7 @@ func installApp(config OneShotConfig, requestID string, payload map[string]any, 
 			return newPlistService(conn, deadline)
 		},
 		openIPA: func(path string) (installRouteSource, error) {
-			return OpenIPA(path)
+			return openInstallSource(path, deadline)
 		},
 		openLockdown: func(udid string, deadline time.Time) (installRouteLockdown, error) {
 			return OpenLockdown(udid, deadline)
@@ -98,6 +98,9 @@ func installAppWithDependencies(config OneShotConfig, requestID string, payload 
 	}
 	source, err := dependencies.openIPA(path)
 	if err != nil {
+		if errors.Is(err, errAppPlatform) {
+			return nil, operationFailure("invalidIPA", "notCommitted", "failed", "appPlatform")
+		}
 		return nil, operationFailure("invalidIPA", "notCommitted", "failed", "archivePreflight")
 	}
 	defer source.Close()

@@ -129,7 +129,7 @@ func extractBundleID(file *os.File, size int64) (string, error) {
 	var candidate *zip.File
 	for _, entry := range archive.File {
 		parts := strings.Split(entry.Name, "/")
-		if len(parts) == 3 && parts[0] == "Payload" && strings.HasSuffix(parts[1], ".app") && parts[2] == "Info.plist" {
+		if len(parts) == 3 && parts[0] == "Payload" && strings.EqualFold(path.Ext(parts[1]), ".app") && parts[2] == "Info.plist" {
 			if candidate != nil {
 				return "", errors.New("multiple ipa app metadata files")
 			}

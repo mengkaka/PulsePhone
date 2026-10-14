@@ -18,6 +18,16 @@ private struct ArgumentFixture: Decodable {
 }
 
 final class ArgumentNormalizerTests: XCTestCase {
+  func testInstallationPathsAcceptDeviceBundlesAndRejectMalformedPaths() throws {
+    for path in ["/tmp/App.ipa", "/tmp/App.app", "/tmp/Build Products/App.APP"] {
+      let result = try ArgumentNormalizer.normalize(schemaID: "ipaPath.v1", raw: ["ipaPath": path])
+      XCTAssertEqual(result.string("ipaPath"), path)
+    }
+    for path in ["App.app", "/tmp/../App.app", "/tmp//App.app", "/tmp/App.app/", "/tmp/App.zip", "/tmp/A\0.app"] {
+      XCTAssertThrowsError(try ArgumentNormalizer.normalize(schemaID: "ipaPath.v1", raw: ["ipaPath": path]))
+    }
+  }
+
   func testLaunchEnvironmentPreservesValuesAndLastAssignment() throws {
     let environment = try LaunchEnvironment.parse([
       "APP_ENV=old", "EMPTY=", "MESSAGE=你好 hello=a=b", "APP_ENV=testing",

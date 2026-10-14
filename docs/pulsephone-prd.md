@@ -4,7 +4,7 @@
 >
 > 基线日期：2026-07-18
 >
-> Command Matrix：`command-matrix.v18-20261014`
+> Command Matrix：`command-matrix.v19-20261014`
 >
 > 默认交付规范：`default-product-delivery.v1-20260722`
 
@@ -989,7 +989,7 @@ ready 后全部入口零额外等待。Capture 关闭只做 release-all 和 inte
 | 90 | Keyboard Capture | checked toggle |
 | 100 | Toggle Software Keyboard | momentary icon button |
 | 110 | Preview Audio | checked toggle；选中=Mac，未选中=Off |
-| 120 | Install IPA | momentary icon button + IPA/App drop |
+| 120 | Install App | momentary icon button + IPA/App drop |
 
 第一阶段不显示 Touch 状态 item，也不显示 Hardware Keyboard toggle。
 
@@ -1166,7 +1166,7 @@ Developer Support source、cache 或 service available 都不等于 command 已�
 | Keyboard Capture | 目标 | 不支持 | GUI |
 | type --text | 目标 | 不支持 | CLI |
 | Text key/cursor/clear/input-source | 目标 | 不支持 | CLI |
-| Install IPA | 目标 | 目标，逐项验证 | CLI + GUI |
+| Install App | 目标 | 目标，逐项验证 | CLI + GUI |
 | Uninstall | 目标 | 目标，逐项验证 | CLI |
 | Launch | 目标 | 条件目标，approved Developer Support | CLI |
 | CLI device screenshot | 目标 | 条件目标，approved Developer Support | CLI |

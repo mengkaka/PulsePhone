@@ -80,6 +80,7 @@ Re-observe after text input. If focus is wrong, observe and retarget instead of 
 PulsePhone apps --udid <UDID> --json
 PulsePhone launch --bundle-id com.example.App --udid <UDID> --json
 PulsePhone install --path /absolute/App.ipa --udid <UDID> --json
+PulsePhone install --path /absolute/Build/Products/Debug-iphoneos/App.app --udid <UDID> --json
 PulsePhone uninstall --bundle-id com.example.App --udid <UDID> --json
 
 PulsePhone button home --udid <UDID> --json
@@ -91,7 +92,8 @@ PulsePhone button mute --udid <UDID> --json
 ```
 
 Install and uninstall change device contents: perform them only on explicit user request, require
-an absolute IPA path, and verify with `apps` when useful. Screenshot output paths must be absolute;
+an absolute IPA file or signed iPhoneOS .app directory, and verify with `apps` when useful.
+Simulator and macOS builds are unsupported; PulsePhone does not re-sign the app. Screenshot output paths must be absolute;
 add `--force` only when replacing that existing output is intended.
 
 Start and stop trace or diagnostics recordings as matched pairs. Clear logs only when the user

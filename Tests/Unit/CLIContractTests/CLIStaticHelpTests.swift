@@ -126,6 +126,13 @@ final class CLIStaticHelpTests: XCTestCase {
         XCTAssertEqual(recorder.calls, [])
     }
 
+    func testInstallHelpDescribesBothFormatsAndDeviceBuildRequirements() throws {
+        let help = try CLIHelpRenderer(surface: Self.staticSurface()).render(.commandPath("install"))
+        for text in [".ipa", ".app", "signed", "simulator", "macOS", "Debug-iphoneos"] {
+            XCTAssertTrue(help.contains(text), text)
+        }
+    }
+
     func testTextKeyHelpRendersTheCompleteAllowlistByCategory() throws {
         let help = try CLIHelpRenderer(surface: Self.staticSurface()).render(
             .commandPath("text key")

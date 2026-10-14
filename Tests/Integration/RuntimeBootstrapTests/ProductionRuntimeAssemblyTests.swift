@@ -874,6 +874,15 @@ final class ProductionRuntimeAssemblyTests: XCTestCase {
       ProductionRuntimeOperationBackend.validIPAPathForExecution(
             directory.appendingPathComponent("Missing.ipa").path
         ))
+        let app = directory.appendingPathComponent("Fixture.app")
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: false)
+        XCTAssertTrue(ProductionRuntimeOperationBackend.validIPAPathForExecution(app.path))
+        let appLink = directory.appendingPathComponent("Link.app")
+        try FileManager.default.createSymbolicLink(at: appLink, withDestinationURL: app)
+        XCTAssertFalse(ProductionRuntimeOperationBackend.validIPAPathForExecution(appLink.path))
+        let appFile = directory.appendingPathComponent("File.app")
+        XCTAssertTrue(FileManager.default.createFile(atPath: appFile.path, contents: Data([1])))
+        XCTAssertFalse(ProductionRuntimeOperationBackend.validIPAPathForExecution(appFile.path))
         let empty = directory.appendingPathComponent("Empty.ipa")
         XCTAssertTrue(FileManager.default.createFile(atPath: empty.path, contents: Data()))
     XCTAssertFalse(

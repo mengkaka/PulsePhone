@@ -205,6 +205,17 @@ final class LiveToolbarGoldenTests: XCTestCase {
             )]),
             ToolbarInstallParameter(absoluteIPAPath: "/tmp/Drop.ipa")
         )
+        XCTAssertEqual(
+            try ToolbarPicker.resolve(selectedPath: "/tmp/App.app", isRegularFile: false, isDirectory: true),
+            .accepted(ToolbarInstallParameter(absoluteIPAPath: "/tmp/App.app"))
+        )
+        XCTAssertEqual(
+            try ToolbarDropTarget.resolve(candidates: [ToolbarDropCandidate(path: "/tmp/App.app", isRegularFile: false, isDirectory: true)]),
+            ToolbarInstallParameter(absoluteIPAPath: "/tmp/App.app")
+        )
+        XCTAssertThrowsError(try ToolbarPicker.resolve(selectedPath: "/tmp/App.app", isRegularFile: true))
+        XCTAssertThrowsError(try ToolbarPicker.resolve(selectedPath: "/tmp/App.ipa", isRegularFile: false, isDirectory: true))
+        XCTAssertThrowsError(try ToolbarDropTarget.resolve(candidates: [ToolbarDropCandidate(path: "/tmp/App.app", isRegularFile: true)]))
         XCTAssertThrowsError(try ToolbarDropTarget.resolve(candidates: []))
         XCTAssertThrowsError(try ToolbarDropTarget.resolve(candidates: [
             ToolbarDropCandidate(path: "/tmp/A.ipa", isRegularFile: true),

@@ -13,7 +13,7 @@
 本节与 PRD 第 11 节共同构成第一阶段完整 Command Matrix。PRD 固定入口、成功边界、发布范围和证据；本节固定 executionShape、activation、availability、claims、candidate、deadline、owner/cleanup 和 logging。共享 Catalog、Planner、CLI help、GUI exposure 和测试 fixture 必须从这两节实现，不得从未注册来源补字段。
 
 ```text
-matrixRevision=command-matrix.v18-20261014
+matrixRevision=command-matrix.v19-20261014
 Product Action rows       52
 Supporting Action rows    21
 non-command features       6
