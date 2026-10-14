@@ -1628,7 +1628,7 @@ GUIHost 已关闭；任务开始前已存在的全局 Runtime 保持不变。关
 
 - 已安装0.2.2在iOS 18.7.8目标上，`devices`成功但`apps --json`在Runtime readiness前返回`internalFailure: runtimeFailed(code: "internalFailure")`。首次运行时`~/Library/Application Support/PulsePhone`不存在；Runtime直接初始化Developer Image store，单级`mkdir(DeveloperImages, 0700)`在父目录缺失时失败。
 - 手动`mkdir -p`使用默认umask 022创建的`PulsePhone/DeveloperImages`均为0755；store要求owned且精确0700，因此仍失败。把两目录收紧为0700后，同一已安装App、设备和命令返回`ok=true`、`truncated=false`及完整列表；原始Runtime异常仍被入口泛化为`internalFailure`。
-- 修复必须由产品在首次运行时安全逐级创建私有目录，并让CLI诊断入口共享；已有0755、symlink或非本用户节点仍fail closed，不替用户修改权限。覆盖fresh、重复启动和拒绝错误权限；完整Xcode Gate及fresh packaged在未预建产品目录的环境运行`apps --json`成功后才可关闭。
+- 修复必须由产品在首次运行时安全逐级创建缺失目录，并让CLI诊断入口共享。按用户确认的最新原则，PulsePhone及其全部下级持久目录已存在时复用、保留原权限，不因0755等非默认mode拒绝；symlink、非目录或非本用户节点仍fail closed，不替用户修改权限，文件/锁的0600要求不变。覆盖fresh、多层0755复用、混合缺失目录及安全拒绝；完整Xcode Gate及fresh packaged在未预建产品目录的环境运行`apps --json`成功后才可关闭。
 
 ### 2026-09-25 实施checkpoint
 

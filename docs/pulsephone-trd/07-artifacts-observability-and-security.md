@@ -116,7 +116,7 @@ developerImageStore:
 ### 30.2 Permissions
 
 ```text
-directories 0700
+new directories 0700
 files/socket/lock 0600
 ```
 
@@ -133,7 +133,9 @@ GUIHost socket gui-<G>.sock   100 bytes, plus NUL <= Darwin sun_path[104]
 
 所有 child path 从已验证 dirfd 使用 `mkdirat/openat/fstatat/unlinkat` 或等价 API。不得信任 `$UID`、`TMPDIR`、`HOME`、cwd、Helper path 或用户字符串。
 
-foreign node owner/type/mode/symlink 校验失败时 fail closed，不 chown/chmod/delete/repair，不 fallback 到第二个 base。
+`<home>/Library/Application Support/PulsePhone`及全部下级持久目录已有则复用、保留原权限；不得仅因目录mode为0755或其他非默认值而拒绝。缺失目录逐级按0700创建。所有者、真实directory、no-follow和node identity检查仍保留，实际读写失败按正常I/O错误处理。规则贯穿Developer Image初始化、publish/read/accounting/prune、Runtime下载接管与Go Helper，以及Configuration、VideoSourceMappings和ActionLogs的所有层级；不放宽文件/socket/lock的0600验证。Runtime临时base与其临时目录仍遵守原来的精确mode要求。
+
+除上述持久目录mode兼容外，foreign node owner/type/mode/symlink 校验失败时 fail closed，不 chown/chmod/delete/repair，不 fallback 到第二个 base。
 
 `VideoSourceMappings/`只允许从validated Application Support anchor逐级创建/打开，设置excluded-from-backup并保持当前Mac本地使用，不经iCloud或其他同步机制分发。每个target只按exact `V`打开当前V2或legacy V1 record，不scan latest、不从其他target fallback。`VideoSourceMappingRecordV2`使用canonical JSON；基础字段固定为：
 
@@ -176,7 +178,7 @@ GUIHost对connected-target duplicate claim和人工reassignment使用进程级�
 
 `DeveloperImages/`设置excluded-from-backup。asset的下载、原子publish与prune使用per-asset exclusive`flock`；Runtime/Helper从完整校验到mount文件全部打开期间持shared`flock`。host-wide`asset-store.lock`把approved remote acquisition并发限制为1，并统一串行化catalog publish、capacity calculation、prune、asset publish和cache-index update/rebuild；lock order固定为`asset-store -> asset`。`cache-index.v1.json`、progress、partial metadata、PID和socket只用于可重建观察，不能替代catalog、integrity、capacity或lock ownership。
 
-Runtime和本地Developer Image诊断入口在初始化store之前，从可信login home的anchored directory验证`Library`，缺失时创建`Application Support`，并逐级验证其owner/type；创建或验证`PulsePhone/DeveloperImages`为当前用户拥有的`0700`目录。首次使用不能要求用户预建目录；产品私有目录既有错误权限、symlink或foreign node必须fail closed，不自动chmod、不跟随、不递归清理。
+Runtime和本地Developer Image诊断入口在初始化store之前，从可信login home的anchored directory验证`Library`，缺失时创建`Application Support`，并逐级验证其owner/type；`PulsePhone/DeveloperImages`及内部各级目录缺失时按0700创建，已存在时复用且不要求精确mode。首次使用不能要求用户预建目录；既有symlink或foreign owner/type仍fail closed，不自动chmod、不跟随、不递归清理。VideoSourceMappings使用同样的父目录初始化策略。
 
 ### 30.3 Storage lifecycle
 
